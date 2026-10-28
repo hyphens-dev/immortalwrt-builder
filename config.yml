@@ -1,0 +1,149 @@
+# ImmortalWrt PVE Builder Configuration
+# ========================================
+
+# Source Configuration
+source:
+  repo: "https://github.com/immortalwrt/immortalwrt.git"
+  branch: "openwrt-24.10"
+  # Specify exact tag, branch, or commit hash
+  # tag: "v25.12.0"
+  # commit: "abc123def456"
+
+# Target Configuration
+target:
+  arch: "x86_64"
+  subtarget: "generic"
+  profile: "generic"
+
+# Kernel Configuration
+kernel:
+  version: "6.12"
+  # CPU optimization level: none, x86-64, x86-64-v2, x86-64-v3
+  cpu_opt: "x86-64-v3"
+  # LTO (Link Time Optimization): none, full, thin
+  lto: "none"
+  # Compiler optimization: O2, O3
+  optimization: "O2"
+
+# Feature Switches
+features:
+  # PVE/KVM VirtIO Support (Required)
+  virtio:
+    enabled: true
+    net: true
+    block: true
+    scsi: true
+    balloon: true
+    rng: true
+    console: true
+    input: true
+    mmio: true
+
+  # VirtIO-FS Support (Critical)
+  virtiofs:
+    enabled: true
+    fuse: true
+
+  # 9P Filesystem Support
+  p9fs:
+    enabled: true
+
+  # Network Features
+  network:
+    wireguard: true
+    nftables: true
+    iptables_nft: true
+    bridge: true
+    multi_wan: true
+
+  # Side Router Features
+  proxy:
+    mihomo: true
+    # Clash Meta fork
+    smartdns: true
+    adguardhome: false
+
+  # System Features
+  system:
+    docker: false
+    luci: true
+    luci_cn: true
+    luci_theme: true
+
+  # Performance Optimizations
+  performance:
+    bbr: true
+    fq_codel: true
+    cake: true
+    irq_balance: true
+
+# Package Lists
+packages:
+  # Additional packages to include
+  include:
+    - "luci"
+    - "luci-i18n-base-zh-cn"
+    - "luci-compat"
+    - "kmod-wireguard"
+    - "wg-installer"
+    - "luci-proto-wireguard"
+    - "kmod-nftables"
+    - "nftables"
+    - "kmod-ipt-nat"
+    - "iptables-nft"
+    - "kmod-bridge"
+    - "kmod-veth"
+    - "smartdns"
+    - "luci-app-smartdns"
+
+  # Packages to exclude
+  exclude:
+    - "ppp"
+    - "ppp-mod-pppoe"
+    - "wpad-basic-wolfssl"
+
+# Release Configuration
+release:
+  enabled: true
+  # Keep last N releases
+  keep_releases: 30
+  # Auto delete old artifacts
+  cleanup_artifacts: true
+  # Generate changelog
+  changelog: true
+  # Upload to release
+  upload: true
+
+# Build Configuration
+build:
+  # Parallel jobs (0 = auto detect)
+  jobs: 0
+  # Build timeout in minutes
+  timeout: 120
+  # Retry on failure
+  retry: true
+  max_retries: 3
+  # Verbose output
+  verbose: false
+
+# Sync Configuration
+sync:
+  # Check interval (cron expression)
+  schedule: "0 2 * * *"
+  # Auto trigger build on update
+  auto_build: true
+  # Sync method: rebase, merge, reset
+  method: "rebase"
+
+# Output Configuration
+output:
+  # Firmware image
+  firmware: "openwrt-x86-64-generic-squashfs-combined.img.gz"
+  # Root filesystem
+  rootfs: "openwrt-x86-64-generic-rootfs.tar.gz"
+  # Kernel
+  kernel: "openwrt-x86-64-generic-kernel.bin"
+  # SHA256 checksums
+  sha256sum: true
+  # Manifest
+  manifest: true

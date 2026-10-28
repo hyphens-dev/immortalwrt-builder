@@ -1,0 +1,814 @@
+name: Build ImmortalWrt PVE Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'ImmortalWrt source repository URL'
+        required: false
+        default: ''
+        type: string
+      source_branch:
+        description: 'ImmortalWrt source branch'
+        required: false
+        default: ''
+        type: string
+      source_tag:
+        description: 'ImmortalWrt source tag (overrides branch)'
+        required: false
+        default: ''
+        type: string
+      target_arch:
+        description: 'Target architecture'
+        required: false
+        default: ''
+        type: string
+      target_subtarget:
+        description: 'Target subtarget'
+        required: false
+        default: ''
+        type: string
+      target_profile:
+        description: 'Target profile'
+        required: false
+        default: ''
+        type: string
+      kernel_version:
+        description: 'Kernel version'
+        required: false
+        default: ''
+        type: string
+      verbose:
+        description: 'Enable verbose build output'
+        required: false
+        default: false
+        type: boolean
+      clean_build:
+        description: 'Perform clean build (ignore caches)'
+        required: false
+        default: false
+        type: boolean
+  repository_dispatch:
+    types:
+      - build
+      - sync-update
+  workflow_call:
+    inputs:
+      source_repo:
+        description: 'ImmortalWrt source repository URL'
+        required: false
+        default: ''
+        type: string
+      source_branch:
+        description: 'ImmortalWrt source branch'
+        required: false
+        default: ''
+        type: string
+      source_tag:
+        description: 'ImmortalWrt source tag (overrides branch)'
+        required: false
+        default: ''
+        type: string
+      target_arch:
+        description: 'Target architecture'
+        required: false
+        default: ''
+        type: string
+      target_subtarget:
+        description: 'Target subtarget'
+        required: false
+        default: ''
+        type: string
+      target_profile:
+        description: 'Target profile'
+        required: false
+        default: ''
+        type: string
+      kernel_version:
+        description: 'Kernel version'
+        required: false
+        default: ''
+        type: string
+      verbose:
+        description: 'Enable verbose build output'
+        required: false
+        default: false
+        type: boolean
+      clean_build:
+        description: 'Perform clean build (ignore caches)'
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      firmware-artifact:
+        description: 'Name of the firmware artifact'
+        value: ${{ jobs.build.outputs.firmware_artifact }}
+      build-status:
+        description: 'Build job status'
+        value: ${{ jobs.build.outputs.build_status }}
+
+env:
+  BUILDER_DIR: ${{ github.workspace }}/builder
+  SOURCE_DIR: ${{ github.workspace }}/builder/immortalwrt
+  CONFIG_DIR: ${{ github.workspace }}/config
+  PATCHES_DIR: ${{ github.workspace }}/patches
+  SCRIPTS_DIR: ${{ github.workspace }}/scripts
+  ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Parse configuration and prepare build matrix
+  # ──────────────────────────────────────────────
+  prepare:
+    name: Parse Configuration
+    runs-on: ubuntu-24.04
+    outputs:
+      source_repo: ${{ steps.config.outputs.source_repo }}
+      source_branch: ${{ steps.config.outputs.source_branch }}
+      source_tag: ${{ steps.config.outputs.source_tag }}
+      target_arch: ${{ steps.config.outputs.target_arch }}
+      target_subtarget: ${{ steps.config.outputs.target_subtarget }}
+      target_profile: ${{ steps.config.outputs.target_profile }}
+      kernel_version: ${{ steps.config.outputs.kernel_version }}
+      cpu_opt: ${{ steps.config.outputs.cpu_opt }}
+      lto: ${{ steps.config.outputs.lto }}
+      optimization: ${{ steps.config.outputs.optimization }}
+      virtio_enabled: ${{ steps.config.outputs.virtio_enabled }}
+      virtiofs_enabled: ${{ steps.config.outputs.virtiofs_enabled }}
+      p9fs_enabled: ${{ steps.config.outputs.p9fs_enabled }}
+      network_wireguard: ${{ steps.config.outputs.network_wireguard }}
+      network_nftables: ${{ steps.config.outputs.network_nftables }}
+      network_bridge: ${{ steps.config.outputs.network_bridge }}
+      proxy_mihomo: ${{ steps.config.outputs.proxy_mihomo }}
+      proxy_smartdns: ${{ steps.config.outputs.proxy_smartdns }}
+      system_docker: ${{ steps.config.outputs.system_docker }}
+      system_luci: ${{ steps.config.outputs.system_luci }}
+      system_luci_cn: ${{ steps.config.outputs.system_luci_cn }}
+      perf_bbr: ${{ steps.config.outputs.perf_bbr }}
+      perf_cake: ${{ steps.config.outputs.perf_cake }}
+      build_jobs: ${{ steps.config.outputs.build_jobs }}
+      build_timeout: ${{ steps.config.outputs.build_timeout }}
+      build_verbose: ${{ steps.config.outputs.build_verbose }}
+      packages_include: ${{ steps.config.outputs.packages_include }}
+      packages_exclude: ${{ steps.config.outputs.packages_exclude }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Parse config.yml
+        id: config
+        run: |
+          # Install yq for YAML parsing
+          sudo snap install yq 2>/dev/null || pip install yq 2>/dev/null || {
+            # Fallback: install via wget
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          }
+
+          CONFIG_FILE="config.yml"
+
+          # Helper: read from config, allow workflow input override
+          read_config() {
+            local key="$1"
+            local input_value="$2"
+            local default="$3"
+            local value
+            value=$(yq ".$key" "$CONFIG_FILE" 2>/dev/null)
+            if [ "$value" = "null" ] || [ -z "$value" ]; then
+              value="$default"
+            fi
+            # Workflow input overrides config
+            if [ -n "$input_value" ] && [ "$input_value" != "" ]; then
+              value="$input_value"
+            fi
+            echo "$value"
+          }
+
+          # Source configuration
+          SOURCE_REPO=$(read_config 'source.repo' "${{ inputs.source_repo }}" "https://github.com/immortalwrt/immortalwrt.git")
+          SOURCE_BRANCH=$(read_config 'source.branch' "${{ inputs.source_branch }}" "openwrt-24.10")
+          SOURCE_TAG=$(read_config 'source.tag' "${{ inputs.source_tag }}" "")
+          TARGET_ARCH=$(read_config 'target.arch' "${{ inputs.target_arch }}" "x86_64")
+          TARGET_SUBTARGET=$(read_config 'target.subtarget' "${{ inputs.target_subtarget }}" "generic")
+          TARGET_PROFILE=$(read_config 'target.profile' "${{ inputs.target_profile }}" "generic")
+          KERNEL_VERSION=$(read_config 'kernel.version' "${{ inputs.kernel_version }}" "6.12")
+
+          # Kernel configuration
+          CPU_OPT=$(yq '.kernel.cpu_opt' "$CONFIG_FILE" 2>/dev/null || echo "x86-64-v3")
+          LTO=$(yq '.kernel.lto' "$CONFIG_FILE" 2>/dev/null || echo "none")
+          OPTIMIZATION=$(yq '.kernel.optimization' "$CONFIG_FILE" 2>/dev/null || echo "O2")
+
+          # Feature toggles
+          VIRTIO_ENABLED=$(yq '.features.virtio.enabled' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          VIRTIOFS_ENABLED=$(yq '.features.virtiofs.enabled' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          P9FS_ENABLED=$(yq '.features.p9fs.enabled' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          NETWORK_WIREGUARD=$(yq '.features.network.wireguard' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          NETWORK_NFTABLES=$(yq '.features.network.nftables' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          NETWORK_BRIDGE=$(yq '.features.network.bridge' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          PROXY_MIHOMO=$(yq '.features.proxy.mihomo' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          PROXY_SMARTDNS=$(yq '.features.proxy.smartdns' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          SYSTEM_DOCKER=$(yq '.features.system.docker' "$CONFIG_FILE" 2>/dev/null || echo "false")
+          SYSTEM_LUCI=$(yq '.features.system.luci' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          SYSTEM_LUCI_CN=$(yq '.features.system.luci_cn' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          PERF_BBR=$(yq '.features.performance.bbr' "$CONFIG_FILE" 2>/dev/null || echo "true")
+          PERF_CAKE=$(yq '.features.performance.cake' "$CONFIG_FILE" 2>/dev/null || echo "true")
+
+          # Build configuration
+          BUILD_JOBS=$(yq '.build.jobs' "$CONFIG_FILE" 2>/dev/null || echo "0")
+          BUILD_TIMEOUT=$(yq '.build.timeout' "$CONFIG_FILE" 2>/dev/null || echo "120")
+          BUILD_VERBOSE=$(yq '.build.verbose' "$CONFIG_FILE" 2>/dev/null || echo "false")
+          # Override verbose from workflow input
+          if [ "${{ inputs.verbose }}" = "true" ]; then
+            BUILD_VERBOSE="true"
+          fi
+
+          # Packages
+          PACKAGES_INCLUDE=$(yq '.packages.include | join(" ")' "$CONFIG_FILE" 2>/dev/null || echo "")
+          PACKAGES_EXCLUDE=$(yq '.packages.exclude | join(" ")' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+          # Set outputs
+          cat >> "$GITHUB_OUTPUT" <<EOF
+          source_repo=${SOURCE_REPO}
+          source_branch=${SOURCE_BRANCH}
+          source_tag=${SOURCE_TAG}
+          target_arch=${TARGET_ARCH}
+          target_subtarget=${TARGET_SUBTARGET}
+          target_profile=${TARGET_PROFILE}
+          kernel_version=${KERNEL_VERSION}
+          cpu_opt=${CPU_OPT}
+          lto=${LTO}
+          optimization=${OPTIMIZATION}
+          virtio_enabled=${VIRTIO_ENABLED}
+          virtiofs_enabled=${VIRTIOFS_ENABLED}
+          p9fs_enabled=${P9FS_ENABLED}
+          network_wireguard=${NETWORK_WIREGUARD}
+          network_nftables=${NETWORK_NFTABLES}
+          network_bridge=${NETWORK_BRIDGE}
+          proxy_mihomo=${PROXY_MIHOMO}
+          proxy_smartdns=${PROXY_SMARTDNS}
+          system_docker=${SYSTEM_DOCKER}
+          system_luci=${SYSTEM_LUCI}
+          system_luci_cn=${SYSTEM_LUCI_CN}
+          perf_bbr=${PERF_BBR}
+          perf_cake=${PERF_CAKE}
+          build_jobs=${BUILD_JOBS}
+          build_timeout=${BUILD_TIMEOUT}
+          build_verbose=${BUILD_VERBOSE}
+          packages_include=${PACKAGES_INCLUDE}
+          packages_exclude=${PACKAGES_EXCLUDE}
+          EOF
+
+          echo "::group::Configuration Summary"
+          echo "Source: ${SOURCE_REPO} (${SOURCE_TAG:-${SOURCE_BRANCH}})"
+          echo "Target: ${TARGET_ARCH}/${TARGET_SUBTARGET}/${TARGET_PROFILE}"
+          echo "Kernel: ${KERNEL_VERSION} (CPU opt: ${CPU_OPT}, LTO: ${LTO}, Opt: ${OPTIMIZATION})"
+          echo "VirtIO: ${VIRTIO_ENABLED}, VirtIO-FS: ${VIRTIOFS_ENABLED}, 9P: ${P9FS_ENABLED}"
+          echo "Build: jobs=${BUILD_JOBS}, timeout=${BUILD_TIMEOUT}min, verbose=${BUILD_VERBOSE}"
+          echo "::endgroup::"
+
+      - name: Generate build matrix
+        id: matrix
+        run: |
+          # Currently single-target; matrix supports future multi-target expansion
+          # To add more targets, extend the include list in config.yml or here
+          MATRIX=$(cat <<'MATRIX_JSON'
+          {
+            "include": [
+              {
+                "target": "x86_64-generic",
+                "arch": "x86_64",
+                "subtarget": "generic",
+                "profile": "generic"
+              }
+            ]
+          }
+          MATRIX_JSON
+          )
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+  # ──────────────────────────────────────────────
+  # Main build job
+  # ──────────────────────────────────────────────
+  build:
+    name: Build Firmware (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    needs: prepare
+    timeout-minutes: ${{ needs.prepare.outputs.build_timeout || 120 }}
+    if: success()
+    outputs:
+      firmware_artifact: firmware-${{ matrix.target }}-${{ github.run_id }}
+      build_status: ${{ steps.build_result.outcome }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    env:
+      SOURCE_REPO: ${{ needs.prepare.outputs.source_repo }}
+      SOURCE_BRANCH: ${{ needs.prepare.outputs.source_branch }}
+      SOURCE_TAG: ${{ needs.prepare.outputs.source_tag }}
+      TARGET_ARCH: ${{ needs.prepare.outputs.target_arch }}
+      TARGET_SUBTARGET: ${{ needs.prepare.outputs.target_subtarget }}
+      TARGET_PROFILE: ${{ needs.prepare.outputs.target_profile }}
+      KERNEL_VERSION: ${{ needs.prepare.outputs.kernel_version }}
+      CPU_OPT: ${{ needs.prepare.outputs.cpu_opt }}
+      LTO: ${{ needs.prepare.outputs.lto }}
+      OPTIMIZATION: ${{ needs.prepare.outputs.optimization }}
+      VIRTIO_ENABLED: ${{ needs.prepare.outputs.virtio_enabled }}
+      VIRTIOFS_ENABLED: ${{ needs.prepare.outputs.virtiofs_enabled }}
+      P9FS_ENABLED: ${{ needs.prepare.outputs.p9fs_enabled }}
+      NETWORK_WIREGUARD: ${{ needs.prepare.outputs.network_wireguard }}
+      NETWORK_NFTABLES: ${{ needs.prepare.outputs.network_nftables }}
+      NETWORK_BRIDGE: ${{ needs.prepare.outputs.network_bridge }}
+      PROXY_MIHOMO: ${{ needs.prepare.outputs.proxy_mihomo }}
+      PROXY_SMARTDNS: ${{ needs.prepare.outputs.proxy_smartdns }}
+      SYSTEM_DOCKER: ${{ needs.prepare.outputs.system_docker }}
+      SYSTEM_LUCI: ${{ needs.prepare.outputs.system_luci }}
+      SYSTEM_LUCI_CN: ${{ needs.prepare.outputs.system_luci_cn }}
+      PERF_BBR: ${{ needs.prepare.outputs.perf_bbr }}
+      PERF_CAKE: ${{ needs.prepare.outputs.perf_cake }}
+      BUILD_JOBS: ${{ needs.prepare.outputs.build_jobs }}
+      BUILD_VERBOSE: ${{ needs.prepare.outputs.build_verbose }}
+      PACKAGES_INCLUDE: ${{ needs.prepare.outputs.packages_include }}
+      PACKAGES_EXCLUDE: ${{ needs.prepare.outputs.packages_exclude }}
+
+    steps:
+      # ── Checkout builder repo ──
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      # ── Install build dependencies ──
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            g++ \
+            gawk \
+            gcc-multilib \
+            g++-multilib \
+            gettext \
+            git \
+            libncurses5-dev \
+            libssl-dev \
+            python3-distutils \
+            python3-setuptools \
+            python3-dev \
+            python3-pyelftools \
+            rsync \
+            swig \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget \
+            xsltproc \
+            subversion \
+            patch \
+            curl \
+            sudo \
+            time \
+            jq \
+            ecj \
+            java-propose-classpath
+
+          # Install yq for YAML parsing in build scripts
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          echo "Build dependencies installed successfully"
+
+      # ── Restore sstate cache ──
+      - name: Restore sstate cache
+        if: ${{ inputs.clean_build != true }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.BUILDER_DIR }}/immortalwrt/tmp
+            ${{ env.BUILDER_DIR }}/immortalwrt/staging_dir
+          key: sstate-${{ matrix.target }}-${{ hashFiles('config.yml') }}-${{ github.run_id }}
+          restore-keys: |
+            sstate-${{ matrix.target }}-${{ hashFiles('config.yml') }}-
+            sstate-${{ matrix.target }}-
+
+      # ── Restore downloads cache ──
+      - name: Restore downloads cache
+        if: ${{ inputs.clean_build != true }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BUILDER_DIR }}/immortalwrt/dl
+          key: downloads-${{ matrix.target }}-${{ hashFiles('config.yml') }}
+          restore-keys: |
+            downloads-${{ matrix.target }}-
+            downloads-
+
+      # ── Checkout ImmortalWrt source ──
+      - name: Checkout ImmortalWrt source
+        run: |
+          mkdir -p "${BUILDER_DIR}"
+          cd "${BUILDER_DIR}"
+
+          # Determine ref to checkout
+          REF="${SOURCE_BRANCH}"
+          if [ -n "${SOURCE_TAG}" ] && [ "${SOURCE_TAG}" != "null" ]; then
+            REF="refs/tags/${SOURCE_TAG}"
+          fi
+
+          echo "Cloning ImmortalWrt from ${SOURCE_REPO} at ${REF}"
+          git clone --depth=1 --branch="${REF}" "${SOURCE_REPO}" immortalwrt
+
+          cd immortalwrt
+          echo "Checked out: $(git log -1 --format='%h %s')"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+
+      # ── Update feeds ──
+      - name: Update feeds
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          echo "::group::Updating feeds"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo "::endgroup::"
+
+      # ── Apply patches ──
+      - name: Apply patches
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          echo "::group::Applying patches"
+
+          PATCH_SCRIPT="${SCRIPTS_DIR}/patch.sh"
+          if [ -x "${PATCH_SCRIPT}" ]; then
+            echo "Using patch script: ${PATCH_SCRIPT}"
+            "${PATCH_SCRIPT}"
+          else
+            echo "Patch script not found, applying patches manually"
+
+            # Apply kernel patches
+            if [ -d "${PATCHES_DIR}/kernel" ]; then
+              for patch in "${PATCHES_DIR}"/kernel/*.patch; do
+                [ -f "$patch" ] || continue
+                echo "Applying kernel patch: $(basename "$patch")"
+                git apply --check "$patch" 2>/dev/null && git apply "$patch" || {
+                  echo "::warning::Failed to apply kernel patch: $(basename "$patch")"
+                }
+              done
+            fi
+
+            # Apply target patches
+            if [ -d "${PATCHES_DIR}/target" ]; then
+              for patch in "${PATCHES_DIR}"/target/*.patch; do
+                [ -f "$patch" ] || continue
+                echo "Applying target patch: $(basename "$patch")"
+                git apply --check "$patch" 2>/dev/null && git apply "$patch" || {
+                  echo "::warning::Failed to apply target patch: $(basename "$patch")"
+                }
+              done
+            fi
+
+            # Apply PVE-specific patches
+            if [ -d "${PATCHES_DIR}/pve" ]; then
+              for patch in "${PATCHES_DIR}"/pve/*.patch; do
+                [ -f "$patch" ] || continue
+                echo "Applying PVE patch: $(basename "$patch")"
+                git apply --check "$patch" 2>/dev/null && git apply "$patch" || {
+                  echo "::warning::Failed to apply PVE patch: $(basename "$patch")"
+                }
+              done
+            fi
+          fi
+
+          echo "::endgroup::"
+
+      # ── Load and merge config ──
+      - name: Load and merge configuration
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          echo "::group::Loading configuration"
+
+          # Start with base target config
+          if [ -f "${CONFIG_DIR}/${TARGET_ARCH}.config" ]; then
+            echo "Loading base config: ${CONFIG_DIR}/${TARGET_ARCH}.config"
+            cp "${CONFIG_DIR}/${TARGET_ARCH}.config" .config
+          else
+            echo "Generating default config for ${TARGET_ARCH}/${TARGET_SUBTARGET}"
+            make defconfig
+          fi
+
+          # Merge kernel config
+          if [ -f "${CONFIG_DIR}/kernel.config" ]; then
+            echo "Merging kernel config"
+            cat "${CONFIG_DIR}/kernel.config" >> .config
+          fi
+
+          # Merge packages config
+          if [ -f "${CONFIG_DIR}/packages.config" ]; then
+            echo "Merging packages config"
+            cat "${CONFIG_DIR}/packages.config" >> .config
+          fi
+
+          # Apply PVE/VirtIO kernel options based on feature toggles
+          {
+            echo "# ── PVE/KVM VirtIO Configuration ──"
+            if [ "${VIRTIO_ENABLED}" = "true" ]; then
+              echo "CONFIG_VIRTIO=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_PCI=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_NET=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_BLK=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_SCSI=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_BALLOON=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_RNG=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_CONSOLE=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_INPUT=y"
+              [ "${VIRTIO_ENABLED}" = "true" ] && echo "CONFIG_VIRTIO_MMIO=y"
+            fi
+
+            if [ "${VIRTIOFS_ENABLED}" = "true" ]; then
+              echo "CONFIG_VIRTIO_FS=y"
+              echo "CONFIG_FUSE_FS=y"
+            fi
+
+            if [ "${P9FS_ENABLED}" = "true" ]; then
+              echo "CONFIG_NET_9P=y"
+              echo "CONFIG_NET_9P_VIRTIO=y"
+              echo "CONFIG_9P_FS=y"
+            fi
+
+            # Performance optimizations
+            if [ "${PERF_BBR}" = "true" ]; then
+              echo "CONFIG_TCP_CONG_BBR=y"
+            fi
+            if [ "${PERF_CAKE}" = "true" ]; then
+              echo "CONFIG_NET_SCH_CAKE=y"
+            fi
+          } >> .config
+
+          # Resolve and finalize config
+          make defconfig
+
+          echo "::endgroup::"
+
+      # ── Download sources ──
+      - name: Download sources
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          echo "::group::Downloading sources"
+          make download -j$(nproc) 2>&1 | tail -20
+          echo "::endgroup::"
+
+      # ── Build firmware ──
+      - name: Build firmware
+        id: build
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+
+          BUILD_SCRIPT="${SCRIPTS_DIR}/build.sh"
+          if [ -x "${BUILD_SCRIPT}" ]; then
+            echo "Using build script: ${BUILD_SCRIPT}"
+            "${BUILD_SCRIPT}"
+          else
+            echo "Build script not found, running make directly"
+
+            # Determine parallel jobs
+            JOBS="${BUILD_JOBS}"
+            if [ "$JOBS" = "0" ] || [ -z "$JOBS" ]; then
+              JOBS=$(nproc)
+            fi
+
+            # Build verbose flag
+            V_FLAG=""
+            if [ "${BUILD_VERBOSE}" = "true" ]; then
+              V_FLAG="V=s"
+            fi
+
+            echo "Starting build with ${JOBS} parallel jobs"
+            make -j"${JOBS}" ${V_FLAG} world
+          fi
+
+      # ── Collect build artifacts ──
+      - name: Collect build artifacts
+        id: collect
+        if: success() || failure()
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          echo "::group::Collecting artifacts"
+
+          ARTIFACT_NAME="firmware-${{ matrix.target }}-${{ github.run_id }}"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+          # Find firmware image
+          FIRMWARE_PATTERN="bin/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/*squashfs-combined*img*"
+          FIRMWARE_FILE=$(ls ${FIRMWARE_PATTERN} 2>/dev/null | head -1)
+          if [ -n "${FIRMWARE_FILE}" ] && [ -f "${FIRMWARE_FILE}" ]; then
+            echo "Found firmware: ${FIRMWARE_FILE}"
+            cp "${FIRMWARE_FILE}" "${ARTIFACT_DIR}/"
+          else
+            echo "::warning::Firmware image not found matching pattern: ${FIRMWARE_PATTERN}"
+            # Try broader search
+            FIRMWARE_FILE=$(find bin/targets/ -name '*combined*img*' -type f 2>/dev/null | head -1)
+            if [ -n "${FIRMWARE_FILE}" ]; then
+              echo "Found firmware (broad search): ${FIRMWARE_FILE}"
+              cp "${FIRMWARE_FILE}" "${ARTIFACT_DIR}/"
+            fi
+          fi
+
+          # Find rootfs
+          ROOTFS_PATTERN="bin/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/*rootfs*"
+          ROOTFS_FILE=$(ls ${ROOTFS_PATTERN} 2>/dev/null | head -1)
+          if [ -n "${ROOTFS_FILE}" ] && [ -f "${ROOTFS_FILE}" ]; then
+            echo "Found rootfs: ${ROOTFS_FILE}"
+            cp "${ROOTFS_FILE}" "${ARTIFACT_DIR}/"
+          fi
+
+          # Find kernel
+          KERNEL_PATTERN="bin/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/*kernel*"
+          KERNEL_FILE=$(ls ${KERNEL_PATTERN} 2>/dev/null | head -1)
+          if [ -n "${KERNEL_FILE}" ] && [ -f "${KERNEL_FILE}" ]; then
+            echo "Found kernel: ${KERNEL_FILE}"
+            cp "${KERNEL_FILE}" "${ARTIFACT_DIR}/"
+          fi
+
+          # Copy additional useful files
+          for ext in sha256sums manifest; do
+            EXTRA_FILE=$(ls "bin/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/"*".${ext}" 2>/dev/null | head -1)
+            if [ -n "${EXTRA_FILE}" ] && [ -f "${EXTRA_FILE}" ]; then
+              cp "${EXTRA_FILE}" "${ARTIFACT_DIR}/"
+            fi
+          done
+
+          echo "::endgroup::"
+
+      # ── Generate SHA256 checksums ──
+      - name: Generate SHA256 checksums
+        if: success() || failure()
+        working-directory: ${{ env.ARTIFACT_DIR }}
+        run: |
+          echo "::group::Generating SHA256 checksums"
+
+          if ls * 1>/dev/null 2>&1; then
+            sha256sum * > sha256sum.txt 2>/dev/null || true
+            echo "SHA256 checksums:"
+            cat sha256sum.txt
+          else
+            echo "::warning::No artifacts found to generate checksums"
+            touch sha256sum.txt
+          fi
+
+          echo "::endgroup::"
+
+      # ── Generate build manifest ──
+      - name: Generate build manifest
+        if: success() || failure()
+        working-directory: ${{ env.ARTIFACT_DIR }}
+        run: |
+          echo "::group::Generating build manifest"
+
+          # Collect artifact file list
+          ARTIFACT_FILES="[]"
+          if ls * 1>/dev/null 2>&1; then
+            for f in *; do
+              [ -f "$f" ] || continue
+              [ "$f" = "manifest.json" ] && continue
+              SIZE=$(stat -c%s "$f" 2>/dev/null || echo "0")
+              SHA=$(sha256sum "$f" 2>/dev/null | awk '{print $1}' || echo "")
+              ARTIFACT_FILES=$(echo "$ARTIFACT_FILES" | jq --arg name "$f" --arg size "$SIZE" --arg sha "$SHA" \
+                '. += [{"name": $name, "size": ($size|tonumber), "sha256": $sha}]')
+            done
+          fi
+
+          # Build manifest JSON
+          jq -n \
+            --arg repo "${SOURCE_REPO}" \
+            --arg branch "${SOURCE_BRANCH}" \
+            --arg tag "${SOURCE_TAG}" \
+            --arg commit "${SOURCE_COMMIT:-unknown}" \
+            --arg arch "${TARGET_ARCH}" \
+            --arg subtarget "${TARGET_SUBTARGET}" \
+            --arg profile "${TARGET_PROFILE}" \
+            --arg kernel "${KERNEL_VERSION}" \
+            --arg cpu_opt "${CPU_OPT}" \
+            --arg lto "${LTO}" \
+            --arg optimization "${OPTIMIZATION}" \
+            --arg virtio "${VIRTIO_ENABLED}" \
+            --arg virtiofs "${VIRTIOFS_ENABLED}" \
+            --arg p9fs "${P9FS_ENABLED}" \
+            --arg build_id "${{ github.run_id }}" \
+            --arg build_number "${{ github.run_number }}" \
+            --arg build_sha "${{ github.sha }}" \
+            --arg build_ref "${{ github.ref_name }}" \
+            --arg build_runner "${{ runner.os }}" \
+            --argjson timestamp "$(date +%s)" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson files "${ARTIFACT_FILES}" \
+            '{
+              "version": "1.0",
+              "build": {
+                "id": $build_id,
+                "number": $build_number,
+                "sha": $build_sha,
+                "ref": $build_ref,
+                "runner": $build_runner,
+                "timestamp": $timestamp,
+                "date": $date
+              },
+              "source": {
+                "repo": $repo,
+                "branch": $branch,
+                "tag": (if $tag == "" then null else $tag end),
+                "commit": $commit
+              },
+              "target": {
+                "arch": $arch,
+                "subtarget": $subtarget,
+                "profile": $profile
+              },
+              "kernel": {
+                "version": $kernel,
+                "cpu_opt": $cpu_opt,
+                "lto": $lto,
+                "optimization": $optimization
+              },
+              "features": {
+                "virtio": ($virtio == "true"),
+                "virtiofs": ($virtiofs == "true"),
+                "p9fs": ($p9fs == "true")
+              },
+              "artifacts": $files
+            }' > manifest.json
+
+          echo "Build manifest:"
+          cat manifest.json
+
+          echo "::endgroup::"
+
+      # ── Upload firmware artifact ──
+      - name: Upload firmware artifact
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}-${{ github.run_id }}
+          path: ${{ env.ARTIFACT_DIR }}/
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 9
+
+      # ── Record build result ──
+      - name: Record build result
+        id: build_result
+        if: success() || failure()
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "outcome=success" >> "$GITHUB_OUTPUT"
+            echo "::notice::Build completed successfully"
+          else
+            echo "outcome=failure" >> "$GITHUB_OUTPUT"
+            echo "::error::Build failed"
+          fi
+
+      # ── Upload build logs on failure ──
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            ${{ env.SOURCE_DIR }}/tmp/logs/
+            ${{ env.SOURCE_DIR }}/.config
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ──────────────────────────────────────────────
+  # Post-build summary
+  # ──────────────────────────────────────────────
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-24.04
+    needs: [prepare, build]
+    if: always()
+    steps:
+      - name: Generate build summary
+        run: |
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Item | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Source | \`${{ needs.prepare.outputs.source_repo }}\` (\`${{ needs.prepare.outputs.source_tag || needs.prepare.outputs.source_branch }}\`) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Target | \`${{ needs.prepare.outputs.target_arch }}/${{ needs.prepare.outputs.target_subtarget }}/${{ needs.prepare.outputs.target_profile }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Kernel | \`${{ needs.prepare.outputs.kernel_version }}\` (CPU opt: \`${{ needs.prepare.outputs.cpu_opt }}\`, LTO: \`${{ needs.prepare.outputs.lto }}\`) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| VirtIO | \`${{ needs.prepare.outputs.virtio_enabled }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| VirtIO-FS | \`${{ needs.prepare.outputs.virtiofs_enabled }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 9P FS | \`${{ needs.prepare.outputs.p9fs_enabled }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Timeout | \`${{ needs.prepare.outputs.build_timeout }}\` min |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build Status | \`${{ needs.build.result }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run ID | \`${{ github.run_id }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.build.result }}" = "failure" ]; then
+            echo "⚠️ **Build failed** - check build logs artifact for details" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ needs.build.result }}" = "success" ]; then
+            echo "✅ **Build succeeded** - firmware artifact available for download" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ℹ️ Build result: \`${{ needs.build.result }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,51 @@
+# Build artifacts
+/output/
+/release/
+/openwrt/
+
+# Cache
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Logs
+*.log
+/tmp/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# OS specific
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Build
+/build/
+/staging_dir/
+/tmp/
+/dl/

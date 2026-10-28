@@ -1,0 +1,239 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # Daily at 02:00 UTC (from config.yml: sync.schedule)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force sync even if no upstream changes detected'
+        required: false
+        default: 'false'
+        type: boolean
+      sync_method:
+        description: 'Sync method (rebase or merge)'
+        required: false
+        default: 'rebase'
+        type: choice
+        options:
+          - rebase
+          - merge
+
+env:
+  UPSTREAM_REPO: "https://github.com/immortalwrt/immortalwrt.git"
+  UPSTREAM_BRANCH: "openwrt-24.10"
+  SYNC_METHOD: "rebase"
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    name: Sync Upstream Changes
+    runs-on: ubuntu-24.04
+    outputs:
+      has_updates: ${{ steps.check-updates.outputs.has_updates }}
+      upstream_commit: ${{ steps.check-updates.outputs.upstream_commit }}
+      sync_method: ${{ steps.config.outputs.sync_method }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read sync configuration
+        id: config
+        run: |
+          # Read values from config.yml, fall back to env defaults
+          if [ -f config.yml ]; then
+            UPSTREAM_REPO=$(grep -E '^\s+repo:' config.yml | head -1 | awk '{print $2}' | tr -d '"')
+            UPSTREAM_BRANCH=$(grep -E '^\s+branch:' config.yml | head -1 | awk '{print $2}' | tr -d '"')
+            SYNC_METHOD_CFG=$(grep -E '^\s+method:' config.yml | head -1 | awk '{print $2}' | tr -d '"')
+
+            [ -n "$UPSTREAM_REPO" ] && echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT || echo "upstream_repo=${{ env.UPSTREAM_REPO }}" >> $GITHUB_OUTPUT
+            [ -n "$UPSTREAM_BRANCH" ] && echo "upstream_branch=$UPSTREAM_BRANCH" >> $GITHUB_OUTPUT || echo "upstream_branch=${{ env.UPSTREAM_BRANCH }}" >> $GITHUB_OUTPUT
+            [ -n "$SYNC_METHOD_CFG" ] && echo "sync_method=$SYNC_METHOD_CFG" >> $GITHUB_OUTPUT || echo "sync_method=${{ env.SYNC_METHOD }}" >> $GITHUB_OUTPUT
+          else
+            echo "upstream_repo=${{ env.UPSTREAM_REPO }}" >> $GITHUB_OUTPUT
+            echo "upstream_branch=${{ env.UPSTREAM_BRANCH }}" >> $GITHUB_OUTPUT
+            echo "sync_method=${{ env.SYNC_METHOD }}" >> $GITHUB_OUTPUT
+          fi
+
+          # Override sync method from workflow_dispatch input if provided
+          if [ -n "${{ inputs.sync_method }}" ]; then
+            echo "sync_method=${{ inputs.sync_method }}" >> $GITHUB_OUTPUT
+          fi
+
+          echo "Configuration:"
+          echo "  Upstream repo: $(grep 'upstream_repo=' $GITHUB_OUTPUT | cut -d= -f2)"
+          echo "  Upstream branch: $(grep 'upstream_branch=' $GITHUB_OUTPUT | cut -d= -f2)"
+          echo "  Sync method: $(grep 'sync_method=' $GITHUB_OUTPUT | cut -d= -f2)"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "${{ steps.config.outputs.upstream_repo }}" 2>/dev/null || git remote set-url upstream "${{ steps.config.outputs.upstream_repo }}"
+          git fetch upstream "${{ steps.config.outputs.upstream_branch }}"
+
+      - name: Check for upstream updates
+        id: check-updates
+        run: |
+          LOCAL_HEAD=$(git rev-parse HEAD)
+          UPSTREAM_HEAD=$(git rev-parse "upstream/${{ steps.config.outputs.upstream_branch }}")
+
+          echo "Local HEAD:  $LOCAL_HEAD"
+          echo "Upstream HEAD: $UPSTREAM_HEAD"
+
+          if [ "$LOCAL_HEAD" = "$UPSTREAM_HEAD" ]; then
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            echo "upstream_commit=$UPSTREAM_HEAD" >> $GITHUB_OUTPUT
+            echo "No upstream changes detected."
+          else
+            NEW_COMMITS=$(git log --oneline HEAD..upstream/${{ steps.config.outputs.upstream_branch }} | wc -l)
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+            echo "upstream_commit=$UPSTREAM_HEAD" >> $GITHUB_OUTPUT
+            echo "Found $NEW_COMMITS new upstream commit(s)."
+            echo ""
+            echo "Recent upstream changes:"
+            git log --oneline -10 HEAD..upstream/${{ steps.config.outputs.upstream_branch }}
+          fi
+
+      - name: Sync with upstream (rebase)
+        if: steps.check-updates.outputs.has_updates == 'true' || inputs.force_sync == 'true'
+        id: sync
+        run: |
+          SYNC_METHOD="${{ steps.config.outputs.sync_method }}"
+          UPSTREAM_BRANCH="${{ steps.config.outputs.upstream_branch }}"
+
+          echo "Syncing using method: $SYNC_METHOD"
+
+          # Configure git identity for the commit
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ "$SYNC_METHOD" = "rebase" ]; then
+            echo "Performing git rebase on upstream/$UPSTREAM_BRANCH..."
+            if ! git rebase "upstream/$UPSTREAM_BRANCH"; then
+              echo "::error::Rebase failed - merge conflicts detected"
+              echo ""
+              echo "Conflicting files:"
+              git diff --name-only --diff-filter=U 2>/dev/null || true
+              echo ""
+              echo "Aborting rebase to restore clean state..."
+              git rebase --abort
+              echo "conflict=true" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          else
+            echo "Performing git merge with upstream/$UPSTREAM_BRANCH..."
+            if ! git merge "upstream/$UPSTREAM_BRANCH" --no-edit; then
+              echo "::error::Merge failed - merge conflicts detected"
+              echo ""
+              echo "Conflicting files:"
+              git diff --name-only --diff-filter=U 2>/dev/null || true
+              echo ""
+              echo "Aborting merge to restore clean state..."
+              git merge --abort
+              echo "conflict=true" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
+
+          echo "conflict=false" >> $GITHUB_OUTPUT
+          echo "Sync completed successfully."
+
+      - name: Push changes
+        if: steps.sync.outputs.conflict == 'false'
+        run: |
+          echo "Pushing synced changes to origin..."
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: Generate commit summary
+        if: steps.sync.outputs.conflict == 'false'
+        id: summary
+        run: |
+          UPSTREAM_COMMIT="${{ steps.check-updates.outputs.upstream_commit }}"
+          UPSTREAM_BRANCH="${{ steps.config.outputs.upstream_branch }}"
+          SYNC_METHOD="${{ steps.config.outputs.sync_method }}"
+
+          COMMIT_COUNT=$(git log --oneline origin/${{ github.ref_name }}~1..origin/${{ github.ref_name }} 2>/dev/null | wc -l || echo "1")
+
+          SHORT_HASH="${UPSTREAM_COMMIT:0:12}"
+
+          echo "## Upstream Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Upstream Repo | \`${{ steps.config.outputs.upstream_repo }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Upstream Branch | \`${UPSTREAM_BRANCH}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Upstream Commit | \`${SHORT_HASH}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Sync Method | \`${SYNC_METHOD}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| New Commits | ${COMMIT_COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Sync completed successfully." >> $GITHUB_STEP_SUMMARY
+
+      - name: Report conflict
+        if: failure() && steps.sync.outputs.conflict == 'true'
+        run: |
+          SYNC_METHOD="${{ steps.config.outputs.sync_method }}"
+          echo "## Merge Conflict Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The \`${SYNC_METHOD}\` operation failed due to merge conflicts." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resolution steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Clone the repository locally" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run \`git fetch upstream\` and \`git ${SYNC_METHOD} upstream/${{ steps.config.outputs.upstream_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Resolve conflicts manually" >> $GITHUB_STEP_SUMMARY
+          echo "4. Push the resolved result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The operation has been **aborted** - no changes were pushed." >> $GITHUB_STEP_SUMMARY
+
+  trigger-build:
+    name: Trigger Build Workflow
+    runs-on: ubuntu-24.04
+    needs: sync-upstream
+    if: needs.sync-upstream.outputs.has_updates == 'true'
+    steps:
+      - name: Read auto_build config
+        id: auto-build
+        run: |
+          AUTO_BUILD="true"
+          if [ -f config.yml ]; then
+            AUTO_BUILD_CFG=$(grep -E '^\s+auto_build:' config.yml | head -1 | awk '{print $2}')
+            [ -n "$AUTO_BUILD_CFG" ] && AUTO_BUILD="$AUTO_BUILD_CFG"
+          fi
+          echo "auto_build=$AUTO_BUILD" >> $GITHUB_OUTPUT
+
+      - name: Trigger build workflow
+        if: steps.auto-build.outputs.auto_build == 'true'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: upstream-sync
+          client-payload: |-
+            {
+              "upstream_commit": "${{ needs.sync-upstream.outputs.upstream_commit }}",
+              "sync_method": "${{ needs.sync-upstream.outputs.sync_method }}",
+              "source": "sync-upstream"
+            }
+
+      - name: Report build trigger
+        if: steps.auto-build.outputs.auto_build == 'true'
+        run: |
+          echo "## Build Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Upstream sync detected changes - build workflow has been triggered." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Upstream Commit | \`${{ needs.sync-upstream.outputs.upstream_commit }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Sync Method | \`${{ needs.sync-upstream.outputs.sync_method }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Event | \`upstream-sync\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Skip build trigger
+        if: steps.auto-build.outputs.auto_build != 'true'
+        run: |
+          echo "## Build Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Auto-build is disabled in config.yml (\`sync.auto_build: false\`)." >> $GITHUB_STEP_SUMMARY
