@@ -123,9 +123,10 @@ jobs:
           fi
           yq --version
 
-          # `key // ""` yields the literal string "null" when the key is absent
-          # in some yq v4 builds, so post-process it.
-          cfg() { yq -r "$1 // \"\" | tr -d '\r' | grep -vx null || true; }
+          # yq prints the literal string "null" for an absent key, so strip it.
+          # grep exits 1 when nothing is left, hence the `|| true`.
+          cfg() { yq -r "$1 // \"\"" config.yml 2>/dev/null \
+                    | tr -d '\r' | grep -vx null || true; }
 
           SOURCE_REPO="${INPUT_SOURCE_REPO:-$(cfg '.source.repo')}"
           SOURCE_BRANCH="${INPUT_SOURCE_BRANCH:-$(cfg '.source.branch')}"
