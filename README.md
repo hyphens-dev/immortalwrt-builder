@@ -1,279 +1,143 @@
 # ImmortalWrt PVE Builder
 
-Automated firmware build system for ImmortalWrt optimized for PVE/KVM virtualization.
+Automated ImmortalWrt builds tuned for PVE / KVM guests (x86_64).
 
-## Features
+## What you actually get
 
-- **PVE/KVM Optimized**: VirtIO drivers (net, block, scsi, balloon, rng, console, input, mmio)
-- **VirtIO-FS Support**: Mount PVE host shares directly in guest
-- **9P Filesystem**: Alternative host-guest file sharing
-- **Side Router Ready**: WireGuard, nftables, SmartDNS, Mihomo (Clash Meta)
-- **Performance Tuned**: BBR, fq_codel, Cake, IRQ balance, x86-64-v3 optimization
-- **Auto CI/CD**: GitHub Actions for automated builds and releases
+- **VirtIO devices** — `virtio-net`, `-blk`, `-scsi`, `-balloon`, `-rng`,
+  `-console`, `-mmio`, `-pci` are compiled into the x86/64 target kernel. There
+  is no `kmod-virtio-*` package and none is needed.
+- **VirtIO-FS** — upstream 24.10 does not ship this module, so this repo adds
+  `kmod-fs-virtiofs` (see [docs/virtiofs.md](docs/virtiofs.md)).
+- **9p / virtio-9p** — the alternative host-share transport, from upstream
+  packages.
+- **Networking** — WireGuard, nftables, bridge/veth/tun.
+- **Performance** — TCP BBR, Cake, fq_codel, irqbalance.
+- **LuCI** — light theme, Chinese translation, statistics, firewall.
 
-## Quick Start
-
-### 1. Fork/Clone Repository
+## Quick start
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/immortalwrt-pve-builder.git
 cd immortalwrt-pve-builder
+# edit config.yml
+./scripts/build.sh
 ```
 
-### 2. Configure Build
+Requirements for a local build: Linux, ~30 GB free disk, the same package set the
+CI installs (see `.github/workflows/build.yml`).
 
-Edit `config.yml`:
+## CI
 
-```yaml
-source:
-  repo: "https://github.com/immortalwrt/immortalwrt.git"
-  branch: "openwrt-24.10"
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `build.yml` | push to `main`, manual, `workflow_dispatch`, `repository_dispatch` | Builds firmware, uploads artifacts, publishes a release |
+| `sync-upstream.yml` | daily 02:00 UTC, manual | Detects new upstream commits and triggers `build.yml` |
+| `cleanup.yml` | weekly Sunday 00:00 UTC, manual | Deletes old runs, artifacts and releases |
 
-target:
-  arch: "x86_64"
-
-features:
-  virtiofs:
-    enabled: true
-  network:
-    wireguard: true
-    nftables: true
-  proxy:
-    mihomo: true
-```
-
-### 3. Trigger Build
-
-**Manual:**
-- Go to Actions → Build ImmortalWrt PVE Firmware → Run workflow
-
-**Automatic:**
-- Daily check for upstream updates
-- Auto-build on new commits
-
-### 4. Download Firmware
-
-- Go to Releases → Download latest firmware
-- Files: `firmware.img.gz`, `rootfs.tar.gz`, `kernel.bin`
-
-## Project Structure
-
-```
-immortalwrt-pve-builder/
-├── .github/workflows/
-│   ├── build.yml           # Main build workflow
-│   ├── sync-upstream.yml   # Upstream sync workflow
-│   ├── release.yml         # Release workflow
-│   └── cleanup.yml         # Cleanup workflow
-├── config/
-│   ├── x86_64.config       # Base target config
-│   ├── kernel.config       # Kernel options (VirtIO, BBR, etc.)
-│   └── packages.config     # Package selection
-├── patches/
-│   ├── kernel/             # Linux kernel patches
-│   ├── target/             # Target system patches
-│   └── pve/                # PVE-specific patches
-├── scripts/
-│   ├── build.sh            # Main build script
-│   ├── patch.sh            # Patch application
-│   ├── sync.sh             # Upstream sync
-│   ├── release.sh          # Release preparation
-│   └── utils.sh            # Utility functions
-├── files/                  # Custom files overlay
-├── config.yml              # Main configuration
-└── README.md
-```
+`sync-upstream.yml` deliberately does **not** rebase this repository onto
+ImmortalWrt — the two repos share no history and the source tree is several
+gigabytes. Each build clones upstream fresh and records the built commit in
+`.upstream-built`.
 
 ## Configuration
 
-### config.yml Options
+Everything lives in [`config.yml`](config.yml). Honest notes about the limits:
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `source.repo` | ImmortalWrt repository | `https://github.com/immortalwrt/immortalwrt.git` |
-| `source.branch` | Branch to build | `openwrt-24.10` |
-| `target.arch` | Target architecture | `x86_64` |
-| `kernel.version` | Kernel version | `6.12` |
-| `kernel.cpu_opt` | CPU optimization | `x86-64-v3` |
-| `features.virtiofs.enabled` | VirtIO-FS support | `true` |
-| `features.network.wireguard` | WireGuard VPN | `true` |
-| `features.proxy.mihomo` | Mihomo (Clash Meta) | `true` |
-| `features.performance.bbr` | BBR congestion control | `true` |
-| `release.keep_releases` | Keep last N releases | `30` |
+| Option | Effect |
+|--------|--------|
+| `source.repo` / `source.branch` / `source.tag` | What to build |
+| `target.arch` / `subtarget` / `profile` | Target triple |
+| `kernel.version` | **Metadata only** (24.10 ships 6.6 for x86) |
+| `kernel.lto` | Real — maps to `CONFIG_USE_LTO` |
+| `kernel.cpu_opt`, `kernel.optimization` | **Not applied** — OpenWrt x86 has no `-march` symbol. See [docs/cpu-tuning.md](docs/cpu-tuning.md) |
+| `features.virtio.*` | Informational — drivers are built-in |
+| `features.virtiofs.enabled` | Real — selects `kmod-fs-virtiofs` + `kmod-fuse` |
+| `features.p9fs.enabled` | Real |
+| `features.network.wireguard` / `.nftables` | Real |
+| `features.performance.*` | Real |
+| `features.proxy.mihomo` | Needs an extra feed in `custom/feeds.conf` (not in 24.10) |
+| `features.proxy.smartdns` | Real |
+| `features.system.docker` | Real |
+| `packages.include` / `packages.exclude` | Appended to `.config` after `defconfig` inputs |
+| `build.timeout` | Per-attempt timeout, minutes (default 350; GitHub caps a job at 360) |
+| `output.*` | **Globs**, not file names (images are version-prefixed) |
 
-### Feature Toggles
+`.config` is assembled in this order:
 
-```yaml
-features:
-  virtio:
-    enabled: true
-    net: true
-    block: true
-    scsi: true
-    balloon: true
-    rng: true
-    console: true
-    input: true
-    mmio: true
+1. `config/x86_64.config` — target, image types, partition sizes
+2. `config/kernel.config` — `CONFIG_KERNEL_*` symbols only
+3. `config/packages.config` — `CONFIG_PACKAGE_*` selections
+4. Feature toggles from `config.yml`
+5. `packages.include` / `packages.exclude`
+6. `make defconfig` (after feeds are installed)
 
-  virtiofs:
-    enabled: true
-    fuse: true
+## Project layout
 
-  p9fs:
-    enabled: true
-
-  network:
-    wireguard: true
-    nftables: true
-    iptables_nft: true
-    bridge: true
-    multi_wan: true
-
-  proxy:
-    mihomo: true
-    smartdns: true
-    adguardhome: false
-
-  system:
-    docker: false
-    luci: true
-    luci_cn: true
-
-  performance:
-    bbr: true
-    fq_codel: true
-    cake: true
-    irq_balance: true
+```
+.
+├── .github/workflows/
+│   ├── build.yml             # build + release
+│   ├── sync-upstream.yml     # detect upstream, trigger build
+│   └── cleanup.yml           # retention
+├── config/
+│   ├── x86_64.config         # target + image options
+│   ├── kernel.config         # CONFIG_KERNEL_* only
+│   └── packages.config       # CONFIG_PACKAGE_* only
+├── custom/                   # optional overlays (see custom/README.md)
+│   ├── files/                # rootfs overlay
+│   ├── packages/             # extra package sources
+│   ├── patches/{kernel,target,pve}/
+│   └── feeds.conf            # extra feeds
+├── package/kernel/linux/modules/
+│   └── fs-virtiofs.mk        # kmod-fs-virtiofs (not in upstream)
+├── scripts/
+│   ├── build.sh              # main entrypoint
+│   ├── patch.sh              # patch application
+│   ├── sync.sh               # local upstream check
+│   ├── release.sh            # local release prep
+│   └── utils.sh              # config parsing, logging, manifest
+├── docs/
+│   ├── virtiofs.md
+│   ├── cpu-tuning.md
+│   └── troubleshooting.md
+└── config.yml
 ```
 
-## PVE Usage
+## PVE usage
 
-### Install Firmware
+1. Download the newest release asset `*squashfs-combined.img.gz`.
+2. `gunzip` it and import as a disk, or write it to a virtual disk.
+3. VM settings: machine `q35`, BIOS `OVMF` (UEFI) or `SeaBIOS`,
+   disk bus **VirtIO**, network device **VirtIO**.
 
-1. Download `firmware.img.gz` from Releases
-2. Create VM in PVE with:
-   - OS: "Do not use any media"
-   - Disk: Import firmware as disk
-   - Network: VirtIO (paravirtualized)
-   - Machine: q35
-   - BIOS: OVMF (UEFI) or SeaBIOS
+For host directory sharing see [docs/virtiofs.md](docs/virtiofs.md).
 
-### Enable VirtIO-FS
+## Diagnostics
 
-1. In PVE VM options, add shared memory:
-   ```
-   args: -object memory-backend-memfd,id=mem,size=1G,share=on -numa node,memdev=mem
-   ```
-
-2. Add VirtIO-FS device:
-   ```
-   hostpci0: virtiofs
-   ```
-
-3. In ImmortalWrt guest:
-   ```bash
-   mkdir -p /mnt/shared
-   mount -t virtiofs shared /mnt/shared
-   ```
-
-### Enable 9P Filesystem
-
-1. In PVE VM config:
-   ```
-   args: -fsdev local,id=fsdev0,path=/path/to/share,security_model=passthrough -device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare
-   ```
-
-2. In ImmortalWrt guest:
-   ```bash
-   mkdir -p /mnt/host
-   mount -t 9p -o trans=virtio hostshare /mnt/host
-   ```
-
-## Customization
-
-### Add Custom Patches
-
-Place `.patch` files in:
-- `patches/kernel/` - Linux kernel patches
-- `patches/target/` - Target system patches
-- `patches/pve/` - PVE-specific patches
-
-### Add Custom Packages
-
-Edit `config/packages.config`:
-```
-CONFIG_PACKAGE_your-package=y
+```bash
+zcat /proc/config.gz | grep -E 'VIRTIO_FS|TCP_CONG_BBR|9P'
+opkg list-installed | grep -E 'virtiofs|9p|wireguard'
+sysctl net.ipv4.tcp_congestion_control
 ```
 
-### Add Custom Files
+## Known limits
 
-Place files in `files/` directory to overlay onto firmware root.
+- GitHub's 4-core / 16 GB runners take 3-4 h for this configuration. The job
+  timeout is set to the platform maximum (360 min).
+- The OpenWrt `staging_dir`/`tmp` trees exceed the 10 GB Actions cache limit, so
+  only `dl/` is cached.
+- `mihomo` is not available from the official feeds.
 
-## Workflows
-
-### build.yml
-- Manual trigger or called by sync
-- Compiles firmware with all optimizations
-- Uploads artifacts
-
-### sync-upstream.yml
-- Daily cron schedule
-- Checks for ImmortalWrt updates
-- Triggers build if updates found
-
-### release.yml
-- Creates GitHub Release
-- Uploads firmware artifacts
-- Generates changelog
-
-### cleanup.yml
-- Weekly cleanup
-- Removes old artifacts
-- Keeps last N releases
-
-## Troubleshooting
-
-### Build Fails
-
-1. Check build logs in Actions
-2. Verify `config.yml` syntax
-3. Check patch compatibility
-
-### VirtIO-FS Not Working
-
-1. Verify kernel config:
-   ```bash
-   zcat /proc/config.gz | grep VIRTIO_FS
-   ```
-2. Check PVE VM configuration
-3. Verify memory backend is configured
-
-### Network Issues
-
-1. Check nftables rules:
-   ```bash
-   nft list ruleset
-   ```
-2. Verify WireGuard config:
-   ```bash
-   wg show
-   ```
-
-## Contributing
-
-1. Fork repository
-2. Create feature branch
-3. Commit changes
-4. Push to branch
-5. Create Pull Request
+See [docs/troubleshooting.md](docs/troubleshooting.md) for the full list of
+things that were silently broken and how they are now handled.
 
 ## License
 
-MIT License - See LICENSE file
+MIT — see [LICENSE](LICENSE).
 
 ## Credits
 
 - [ImmortalWrt](https://github.com/immortalwrt/immortalwrt)
 - [OpenWrt](https://openwrt.org)
-- [PVE](https://pve.proxmox.com)
+- [Proxmox VE](https://www.proxmox.com)

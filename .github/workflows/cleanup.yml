@@ -2,190 +2,182 @@ name: Cleanup Workflow Runs and Artifacts
 
 on:
   schedule:
-    # Run weekly on Sunday at 00:00 UTC
     - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run mode (no actual deletion)'
+        description: 'Dry run (report only, delete nothing)'
         required: false
-        default: 'false'
+        default: true
         type: boolean
 
 env:
-  KEEP_RELEASES: 30
+  DEFAULT_KEEP_RELEASES: 10
+  DEFAULT_KEEP_RUNS: 30
   ARTIFACT_RETENTION_DAYS: 7
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
-  cleanup-workflow-runs:
-    name: Cleanup Old Workflow Runs
+  read-config:
+    name: Read retention config
     runs-on: ubuntu-24.04
     outputs:
-      deleted_count: ${{ steps.cleanup.outputs.deleted_count }}
+      keep_releases: ${{ steps.cfg.outputs.keep_releases }}
+      keep_runs: ${{ steps.cfg.outputs.keep_runs }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Get workflow run retention policy
-        id: retention
+      - uses: actions/checkout@v4
+      - id: cfg
         run: |
-          # Read keep_releases from config.yml if it exists
-          if [ -f config.yml ]; then
-            KEEP_RELEASES=$(grep -E '^\s*keep_releases:' config.yml | awk '{print $2}')
-            if [ -n "$KEEP_RELEASES" ]; then
-              echo "Using keep_releases from config.yml: $KEEP_RELEASES"
-              echo "keep_releases=$KEEP_RELEASES" >> $GITHUB_OUTPUT
-            else
-              echo "Using default keep_releases: ${{ env.KEEP_RELEASES }}"
-              echo "keep_releases=${{ env.KEEP_RELEASES }}" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Using default keep_releases: ${{ env.KEEP_RELEASES }}"
-            echo "keep_releases=${{ env.KEEP_RELEASES }}" >> $GITHUB_OUTPUT
-          fi
+          set -euo pipefail
+          KEEP_RELEASES="$(grep -E '^[[:space:]]+keep_releases:' config.yml | head -1 | awk '{print $2}')"
+          [ -n "${KEEP_RELEASES:-}" ] || KEEP_RELEASES="${DEFAULT_KEEP_RELEASES}"
+          echo "keep_releases=${KEEP_RELEASES}" >> "$GITHUB_OUTPUT"
+          echo "keep_runs=${DEFAULT_KEEP_RUNS}" >> "$GITHUB_OUTPUT"
 
-      - name: Delete old workflow runs
-        id: cleanup
+  cleanup-runs:
+    name: Delete old workflow runs
+    needs: read-config
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete old runs
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
-          KEEP_RELEASES: ${{ steps.retention.outputs.keep_releases }}
+          KEEP: ${{ needs.read-config.outputs.keep_runs }}
+          DRY_RUN: ${{ inputs.dry_run || 'true' }}
         run: |
-          # Determine dry run flag
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "Running in DRY RUN mode - no deletions will be performed"
-            DRY_FLAG="--dry-run"
-          else
-            DRY_FLAG=""
-          fi
+          set -euo pipefail
 
-          # Get all workflow runs, excluding active runs
-          # We keep the last N runs per workflow
-          deleted=0
-          
-          # Get list of workflow run IDs (excluding active ones)
-          # Active runs have status: queued, in_progress, waiting
-          run_ids=$(gh run list --json id,databaseId,status,workflowName \
-            --jq '.[] | select(.status != "queued" and .status != "in_progress" and .status != "waiting") | .databaseId' 2>/dev/null | \
-            tail -n +$((KEEP_RELEASES + 1)))
+          # gh paginates; --limit 500 avoids only ever seeing the first page
+          mapfile -t RUN_IDS < <(
+            gh run list --limit 500 --json databaseId,status \
+              --jq '.[] | select(.status == "completed") | .databaseId'
+          )
 
-          if [ -z "$run_ids" ]; then
-            echo "No old workflow runs to delete"
-            echo "deleted_count=0" >> $GITHUB_OUTPUT
+          echo "Completed runs found: ${#RUN_IDS[@]} (keeping newest ${KEEP})"
+
+          if [ "${#RUN_IDS[@]}" -le "${KEEP}" ]; then
+            echo "Nothing to delete."
             exit 0
           fi
 
-          for run_id in $run_ids; do
-            if [ "$DRY_RUN" = "true" ]; then
-              echo "Would delete workflow run: $run_id"
+          deleted=0
+          for id in "${RUN_IDS[@]:$KEEP}"; do
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "[dry-run] would delete run ${id}"
             else
-              echo "Deleting workflow run: $run_id"
-              gh run delete $run_id 2>/dev/null || true
+              gh run delete "$id" && echo "deleted run ${id}"
             fi
             deleted=$((deleted + 1))
           done
 
-          echo "Deleted $deleted workflow runs"
-          echo "deleted_count=$deleted" >> $GITHUB_OUTPUT
+          echo "### Workflow runs" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${deleted} run(s) ${DRY_RUN:+processed}$([ "${DRY_RUN}" = "true" ] && echo ' (dry run)')." >> "$GITHUB_STEP_SUMMARY"
 
   cleanup-artifacts:
-    name: Cleanup Old Artifacts
+    name: Delete old artifacts
+    needs: read-config
     runs-on: ubuntu-24.04
-    needs: cleanup-workflow-runs
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Delete old artifacts
-        uses: actions/delete-artifact@v4
-        with:
-          name: ''
-          pattern: '*'
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-          use-gh-cli: true
-
-      - name: Report artifact cleanup
-        run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "Artifact cleanup (dry run): Would delete artifacts older than ${{ env.ARTIFACT_RETENTION_DAYS }} days"
-          else
-            echo "Artifact cleanup: Deleted artifacts older than ${{ env.ARTIFACT_RETENTION_DAYS }} days"
-          fi
-
-  cleanup-releases:
-    name: Cleanup Old Releases
-    runs-on: ubuntu-24.04
-    needs: cleanup-workflow-runs
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Get release retention from config
-        id: config
-        run: |
-          if [ -f config.yml ]; then
-            KEEP_RELEASES=$(grep -E '^\s*keep_releases:' config.yml | awk '{print $2}')
-            if [ -n "$KEEP_RELEASES" ]; then
-              echo "keep_releases=$KEEP_RELEASES" >> $GITHUB_OUTPUT
-            else
-              echo "keep_releases=${{ env.KEEP_RELEASES }}" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "keep_releases=${{ env.KEEP_RELEASES }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Delete old releases
+      - uses: actions/checkout@v4
+      - name: Delete expired artifacts
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
-          KEEP_RELEASES: ${{ steps.config.outputs.keep_releases }}
+          DRY_RUN: ${{ inputs.dry_run || 'true' }}
+          DAYS: ${{ env.ARTIFACT_RETENTION_DAYS }}
         run: |
-          # Determine dry run mode
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "Running in DRY RUN mode - no deletions will be performed"
-          fi
+          set -euo pipefail
 
-          # Get all releases sorted by created date (newest first)
-          # We skip the first KEEP_RELEASES (latest releases)
-          releases_to_delete=$(gh release list --json tagName,isDraft,isPrerelease,createdAt \
-            --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | 
-                 sort_by(.createdAt) | reverse | 
-                 .['${KEEP_RELEASES}':] | .[].tagName' 2>/dev/null)
+          # GitHub already expires artifacts via retention-days; this catches
+          # anything left behind by older runs.
+          CUTOFF="$(date -u -d "${DAYS} days ago" +%s)"
 
-          if [ -z "$releases_to_delete" ]; then
-            echo "No old releases to delete (keeping latest $KEEP_RELEASES)"
-            exit 0
-          fi
+          mapfile -t EXPIRED < <(
+            gh api --paginate "repos/${GH_REPO}/actions/artifacts?per_page=100" \
+              --jq ".artifacts[] | select((.created_at | fromdate) < ${CUTOFF}) | .id"
+          )
+
+          echo "Expired artifacts: ${#EXPIRED[@]}"
 
           deleted=0
-          for tag in $releases_to_delete; do
-            if [ "$DRY_RUN" = "true" ]; then
-              echo "Would delete release: $tag"
+          for id in "${EXPIRED[@]}"; do
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "[dry-run] would delete artifact ${id}"
             else
-              echo "Deleting release: $tag"
-              gh release delete "$tag" --yes 2>/dev/null || true
+              gh api -X DELETE "repos/${GH_REPO}/actions/artifacts/${id}" \
+                && echo "deleted artifact ${id}"
             fi
             deleted=$((deleted + 1))
           done
 
-          echo "Deleted $deleted old releases (kept latest $KEEP_RELEASES)"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${deleted} artifact(s) older than ${DAYS} days processed." >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup-releases:
+    name: Delete old releases
+    needs: read-config
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Delete old releases and tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          KEEP: ${{ needs.read-config.outputs.keep_releases }}
+          DRY_RUN: ${{ inputs.dry_run || 'true' }}
+        run: |
+          set -euo pipefail
+
+          # Newest first, skip the newest KEEP entries
+          mapfile -t TAGS < <(
+            gh release list --limit 200 --json tagName,createdAt,isDraft,isPrerelease \
+              --jq '[.[] | select(.isDraft == false)] | sort_by(.createdAt) | reverse | .[] | .tagName'
+          )
+
+          echo "Releases found: ${#TAGS[@]} (keeping newest ${KEEP})"
+
+          if [ "${#TAGS[@]}" -le "${KEEP}" ]; then
+            echo "Nothing to delete."
+            exit 0
+          fi
+
+          deleted=0
+          for tag in "${TAGS[@]:$KEEP}"; do
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "[dry-run] would delete release ${tag}"
+            else
+              gh release delete "$tag" --yes --cleanup-tag && echo "deleted release ${tag}"
+            fi
+            deleted=$((deleted + 1))
+          done
+
+          echo "### Releases" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${deleted} release(s) processed (tags removed too)." >> "$GITHUB_STEP_SUMMARY"
 
   summary:
     name: Cleanup Summary
-    runs-on: ubuntu-24.04
-    needs: [cleanup-workflow-runs, cleanup-artifacts, cleanup-releases]
+    needs: [cleanup-runs, cleanup-artifacts, cleanup-releases]
     if: always()
+    runs-on: ubuntu-24.04
     steps:
-      - name: Print Cleanup Summary
-        run: |
-          echo "## Cleanup Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Task | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Workflow Runs | ${needs.cleanup-workflow-runs.outputs.deleted_count:-0} deleted |" >> $GITHUB_STEP_SUMMARY
-          echo "| Artifacts | Older than ${{ env.ARTIFACT_RETENTION_DAYS }} days cleaned |" >> $GITHUB_STEP_SUMMARY
-          echo "| Releases | Kept latest ${{ env.KEEP_RELEASES }} releases |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "**Dry run mode** - no actual deletions performed" >> $GITHUB_STEP_SUMMARY
-          fi
+      - run: |
+          {
+            echo "## Cleanup Summary"
+            echo ""
+            echo "| Task | Result |"
+            echo "|------|--------|"
+            echo "| Workflow runs | \`${{ needs.cleanup-runs.result }}\` |"
+            echo "| Artifacts | \`${{ needs.cleanup-artifacts.result }}\` |"
+            echo "| Releases | \`${{ needs.cleanup-releases.result }}\` |"
+            echo "| Dry run | \`${{ inputs.dry_run || 'true' }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

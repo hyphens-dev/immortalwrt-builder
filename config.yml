@@ -1,33 +1,45 @@
 # ImmortalWrt PVE Builder Configuration
 # ========================================
+# Every key here is consumed by scripts/utils.sh + scripts/build.sh and by the
+# GitHub Actions workflows. Values that OpenWrt cannot actually honour are
+# documented as such instead of being silently ignored.
 
 # Source Configuration
 source:
   repo: "https://github.com/immortalwrt/immortalwrt.git"
   branch: "openwrt-24.10"
-  # Specify exact tag, branch, or commit hash
-  # tag: "v25.12.0"
+  # Optional: pin an exact tag or commit instead of tracking the branch
+  # tag: "v24.10.0"
   # commit: "abc123def456"
 
 # Target Configuration
+# IMPORTANT: OpenWrt x86 has board=x86 and subtarget=64, so build output lands
+# in bin/targets/x86/64/ - NOT bin/targets/x86_64/generic/.
 target:
-  arch: "x86_64"
-  subtarget: "generic"
-  profile: "generic"
+  arch: "x86_64"       # display / package architecture
+  board: "x86"         # target/linux/<board>
+  subtarget: "64"      # target/linux/<board>/<subtarget>
+  profile: "generic"   # device profile
 
 # Kernel Configuration
 kernel:
-  version: "6.12"
-  # CPU optimization level: none, x86-64, x86-64-v2, x86-64-v3
-  cpu_opt: "x86-64-v3"
-  # LTO (Link Time Optimization): none, full, thin
-  lto: "none"
-  # Compiler optimization: O2, O3
-  optimization: "O2"
+  # Informational: openwrt-24.10 ships Linux 6.6 for the x86 target
+  # (see target/linux/x86/Makefile: KERNEL_PATCHVER:=6.6).
+  # This value only affects version strings and the manifest, not the build.
+  version: "6.6"
+  # link-time optimisation: on / off  -> CONFIG_USE_LTO
+  lto: "off"
+  # OPTIONS, NOT APPLIED: OpenWrt x86 has no Kconfig symbol for -march /
+  # -O2..-O3 tuning, so these are kept purely as documentation. To really tune
+  # the CPU you have to patch include/target.mk (see docs/cpu-tuning.md).
+  cpu_opt: "none"
+  optimization: "default"
 
 # Feature Switches
 features:
-  # PVE/KVM VirtIO Support (Required)
+  # VirtIO (PVE/KVM paravirtual devices)
+  # The drivers are built into the x86/64 target kernel, so these toggles are
+  # informational only - there is nothing to select in .config.
   virtio:
     enabled: true
     net: true
@@ -39,12 +51,13 @@ features:
     input: true
     mmio: true
 
-  # VirtIO-FS Support (Critical)
+  # VirtIO-FS (mount PVE host shares in the guest)
+  # Requires the in-tree kmod-fs-virtiofs from package/kernel/linux/modules/
   virtiofs:
     enabled: true
     fuse: true
 
-  # 9P Filesystem Support
+  # 9P Filesystem (alternative host-guest sharing)
   p9fs:
     enabled: true
 
@@ -54,12 +67,13 @@ features:
     nftables: true
     iptables_nft: true
     bridge: true
-    multi_wan: true
+    multi_wan: false
 
   # Side Router Features
   proxy:
-    mihomo: true
-    # Clash Meta fork
+    # mihomo is NOT in the official 24.10 feeds. Enable it only after adding a
+    # feed that provides it to custom/feeds.conf.
+    mihomo: false
     smartdns: true
     adguardhome: false
 
@@ -78,72 +92,52 @@ features:
     irq_balance: true
 
 # Package Lists
+# Additional package selections are appended to config/packages.config.
 packages:
-  # Additional packages to include
   include:
-    - "luci"
-    - "luci-i18n-base-zh-cn"
-    - "luci-compat"
-    - "kmod-wireguard"
-    - "wg-installer"
+    - "luci-app-statistics"
     - "luci-proto-wireguard"
-    - "kmod-nftables"
-    - "nftables"
-    - "kmod-ipt-nat"
-    - "iptables-nft"
-    - "kmod-bridge"
-    - "kmod-veth"
     - "smartdns"
     - "luci-app-smartdns"
-
-  # Packages to exclude
+    - "irqbalance"
+    - "htop"
+    - "tcpdump"
   exclude:
     - "ppp"
     - "ppp-mod-pppoe"
-    - "wpad-basic-wolfssl"
 
 # Release Configuration
 release:
   enabled: true
-  # Keep last N releases
-  keep_releases: 30
-  # Auto delete old artifacts
+  keep_releases: 10
   cleanup_artifacts: true
-  # Generate changelog
   changelog: true
-  # Upload to release
   upload: true
 
 # Build Configuration
 build:
-  # Parallel jobs (0 = auto detect)
+  # Parallel jobs (0 = nproc)
   jobs: 0
-  # Build timeout in minutes
-  timeout: 120
-  # Retry on failure
-  retry: true
-  max_retries: 3
-  # Verbose output
+  # Hard per-attempt timeout in minutes. A full x86_64 + LuCI build on a
+  # 4-core GitHub runner regularly needs 3-4h.
+  timeout: 350
+  retry: false
+  max_retries: 1
   verbose: false
 
-# Sync Configuration
+# Upstream sync
+# The builder never rebases itself onto ImmortalWrt (the two repositories share
+# no history). It only detects new upstream commits and triggers a build.
 sync:
-  # Check interval (cron expression)
+  enabled: true
   schedule: "0 2 * * *"
-  # Auto trigger build on update
   auto_build: true
-  # Sync method: rebase, merge, reset
-  method: "rebase"
 
 # Output Configuration
+# Globs matched inside bin/targets/<board>/<subtarget>/.
 output:
-  # Firmware image
-  firmware: "openwrt-x86-64-generic-squashfs-combined.img.gz"
-  # Root filesystem
-  rootfs: "openwrt-x86-64-generic-rootfs.tar.gz"
-  # Kernel
-  kernel: "openwrt-x86-64-generic-kernel.bin"
-  # SHA256 checksums
+  firmware: "*combined*.img.gz"
+  rootfs: "*rootfs*"
+  kernel: "*kernel.bin"
   sha256sum: true
-  # Manifest
   manifest: true

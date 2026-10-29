@@ -2,6 +2,10 @@
 /output/
 /release/
 /openwrt/
+/artifacts/
+
+# Local build state
+/.upstream-built
 
 # Cache
 *.swp
@@ -17,16 +21,14 @@ Thumbs.db
 
 # Logs
 *.log
-/tmp/
+*.orig
+*.rej
 
 # Temporary files
 *.tmp
 *.bak
-*.orig
 
 # OS specific
-.DS_Store
-Thumbs.db
 ehthumbs.db
 Desktop.ini
 
@@ -34,7 +36,6 @@ Desktop.ini
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 .Python
 env/
 venv/
@@ -44,7 +45,7 @@ venv/
 node_modules/
 npm-debug.log*
 
-# Build
+# OpenWrt source tree leftovers (if built in-place)
 /build/
 /staging_dir/
 /tmp/

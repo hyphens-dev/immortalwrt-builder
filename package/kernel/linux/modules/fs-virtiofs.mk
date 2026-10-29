@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# Copyright (C) 2024 ImmortalWrt Project
+# VirtIO-FS support for ImmortalWrt/OpenWrt.
 #
-# This is free software, licensed under the GNU General Public License v2.
-# See /LICENSE for more information.
+# Upstream 24.10 ships no kmod-fs-virtiofs package, so this file adds one. It is
+# installed into the source tree by scripts/build.sh (package/kernel/linux/
+# modules/ is globbed by package/kernel/linux/Makefile:76).
 #
+# Notes:
+#  * No dependency on a non-existent VIRTIO_SUPPORT symbol - the virtio core is
+#    already built into the x86/64 target kernel.
+#  * Only symbols that exist in Linux 6.6 are listed. CONFIG_FUSE_PASSTHROUGH /
+#    CONFIG_FUSE_IO_URING are >= 6.9, CONFIG_FUSE_VIRTIO_FS does not exist at
+#    all (virtiofs lives in fs/fuse/ and is gated by CONFIG_VIRTIO_FS).
+#  * virtiofs.ko is built into fs/fuse/ since kernel 5.10.
 
 define KernelPackage/fs-virtiofs
   SUBMENU:=$(FS_MENU)
   TITLE:=VirtIO Filesystem support
-  DEPENDS:=+kmod-fuse @VIRTIO_SUPPORT
+  DEPENDS:=+kmod-fuse
   KCONFIG:= \
     CONFIG_VIRTIO_FS \
-    CONFIG_FUSE_DAX=n \
-    CONFIG_FUSE_PASSTHROUGH=n \
-    CONFIG_FUSE_IO_URING=n
+    CONFIG_FUSE_DAX=n
   FILES:= \
     $(LINUX_DIR)/fs/fuse/virtiofs.ko
   AUTOLOAD:=$(call AutoLoad,81,virtiofs)
@@ -22,8 +28,8 @@ endef
 
 define KernelPackage/fs-virtiofs/description
   Kernel module for VirtIO Filesystem (virtiofs) support.
-  This enables mounting host directories shared via VirtIO-FS
-  shared filesystem from PVE/KVM hypervisors.
+  Enables mounting host directories shared via a VirtIO-FS device, as
+  provided by PVE/KVM (virtiofsd).
 endef
 
 $(eval $(call KernelPackage,fs-virtiofs))

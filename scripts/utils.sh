@@ -159,74 +159,102 @@ parse_config() {
             _CONFIG_CACHE["${key}"]="${value}"
         done < <(yq -r '.. | select(tag == "!!str" or tag == "!!int" or tag == "!!bool" or tag == "!!float") | (path | join(".")) + "=" + . ' "${config_file}" 2>/dev/null)
     else
-        # Fallback: simple grep/sed parser for flat and one-level-nested keys
-        # This handles the config.yml format used in this project
-        local current_section=""
-        while IFS= read -r line; do
-            # Skip comments and empty lines
+        # Fallback: indentation-aware parser for the YAML subset used by this
+        # project (nested maps + flat lists of scalars). Requires bash 4.2+.
+        #
+        # A stack of "<indent>:<key>" entries tracks the current path so that
+        # arbitrarily deep keys resolve to full dot-paths, e.g.
+        # "features.virtiofs.enabled" and "packages.include".
+        local _stack=""
+        local line stripped indent key value item full_key existing
+
+        # Drop every stack entry at the same or deeper indentation
+        _cfg_pop() {
+            local entry last_indent
+            while [[ -n "${_stack}" ]]; do
+                entry="${_stack##*|}"
+                last_indent="${entry%%:*}"
+                if (( last_indent >= $1 )); then
+                    if [[ "${_stack}" == *"|"* ]]; then
+                        _stack="${_stack%|*}"
+                    else
+                        _stack=""
+                    fi
+                else
+                    break
+                fi
+            done
+        }
+
+        # Full dot-path of the current stack
+        _cfg_path() {
+            local out="" entry
+            local IFS='|'
+            for entry in ${_stack}; do
+                out="${out:+${out}.}${entry#*:}"
+            done
+            printf '%s' "${out}"
+        }
+
+        # Trim surrounding whitespace and one layer of quotes from a scalar
+        _cfg_scalar() {
+            local v="$1"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            if (( ${#v} >= 2 )) && [[ "${v:0:1}" == '"' && "${v: -1}" == '"' ]]; then
+                v="${v:1:${#v}-2}"
+            elif (( ${#v} >= 2 )) && [[ "${v:0:1}" == "'" && "${v: -1}" == "'" ]]; then
+                v="${v:1:${#v}-2}"
+            fi
+            printf '%s' "${v}"
+        }
+
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            line="${line%$'\r'}"
+
+            # Skip comments and blank lines
             [[ "${line}" =~ ^[[:space:]]*# ]] && continue
             [[ "${line}" =~ ^[[:space:]]*$ ]] && continue
 
-            # Detect section headers (no leading spaces)
-            if [[ "${line}" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*):[[:space:]]*$ ]]; then
-                current_section="${BASH_REMATCH[1]}"
-                continue
-            fi
+            stripped="${line#"${line%%[![:space:]]*}"}"
+            indent=$(( ${#line} - ${#stripped} ))
 
-            # Detect section with inline value (e.g. "key: value")
-            if [[ "${line}" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*):[[:space:]]*(.+)[[:space:]]*$ ]]; then
-                local key="${BASH_REMATCH[1]}"
-                local value="${BASH_REMATCH[2]}"
-                # Trim quotes from value
-                value="${value#\"}"
-                value="${value%\"}"
-                value="${value#\'}"
-                value="${value%\'}"
-
-                if [[ -n "${current_section}" ]]; then
-                    # Nested key: detect indentation level
-                    local indent=""
-                    local stripped="${line#"${line%%[![:space:]]*}"}"
-                    local leading_spaces=$(( ${#line} - ${#stripped} ))
-
-                    if [[ ${leading_spaces} -ge 4 ]]; then
-                        # Two levels deep: section.subsection.key
-                        # We need the parent subsection
-                        _CONFIG_CACHE["${current_section}.${key}"]="${value}"
-                    else
-                        _CONFIG_CACHE["${current_section}.${key}"]="${value}"
-                    fi
-                else
-                    _CONFIG_CACHE["${key}"]="${value}"
-                fi
-                continue
-            fi
-
-            # Detect list items (e.g. "  - item")
-            if [[ "${line}" =~ ^[[:space:]]+-[[:space:]]*(.+)[[:space:]]*$ ]]; then
-                local item="${BASH_REMATCH[1]}"
-                item="${item#\"}"
-                item="${item%\"}"
-                if [[ -n "${current_section}" ]]; then
-                    local existing="${_CONFIG_CACHE["${current_section}"]:-}"
+            # List item: "- value"
+            if [[ "${stripped}" =~ ^-[[:space:]]*(.*)$ ]]; then
+                item="$(_cfg_scalar "${BASH_REMATCH[1]}")"
+                _cfg_pop "${indent}"
+                full_key="$(_cfg_path)"
+                if [[ -n "${full_key}" && -n "${item}" ]]; then
+                    existing="${_CONFIG_CACHE["${full_key}"]:-}"
                     if [[ -n "${existing}" ]]; then
-                        _CONFIG_CACHE["${current_section}"]="${existing} ${item}"
+                        _CONFIG_CACHE["${full_key}"]="${existing} ${item}"
                     else
-                        _CONFIG_CACHE["${current_section}"]="${item}"
+                        _CONFIG_CACHE["${full_key}"]="${item}"
                     fi
                 fi
                 continue
             fi
 
-            # Detect sub-section (2-space indent, key with no value or sub-dict)
-            if [[ "${line}" =~ ^[[:space:]]{2}([a-zA-Z_][a-zA-Z0-9_]*):[[:space:]]*$ ]]; then
-                local subkey="${BASH_REMATCH[1]}"
-                if [[ -n "${current_section}" ]]; then
-                    current_section="${current_section}.${subkey}"
+            # "key: value" (scalar) or "key:" (nested map header)
+            if [[ "${stripped}" =~ ^([a-zA-Z_][a-zA-Z0-9_-]*):[[:space:]]*(.*)$ ]]; then
+                key="${BASH_REMATCH[1]}"
+                value="$(_cfg_scalar "${BASH_REMATCH[2]}")"
+
+                _cfg_pop "${indent}"
+
+                if [[ -n "${value}" ]]; then
+                    full_key="$(_cfg_path)"
+                    full_key="${full_key:+${full_key}.}${key}"
+                    _CONFIG_CACHE["${full_key}"]="${value}"
+                    log_debug "config: ${full_key}=${value}"
+                else
+                    _stack="${_stack:+${_stack}|}${indent}:${key}"
+                    log_debug "config: section -> $(_cfg_path)"
                 fi
                 continue
             fi
 
+            log_debug "config: unparsed line: ${line}"
         done < "${config_file}"
     fi
 
@@ -250,10 +278,12 @@ get_config_value() {
         parse_config
     fi
 
-    # Try yq first for nested lookups if available
+    # Try yq first for nested lookups if available.
+    # Sequences are joined with spaces so callers always get a scalar back.
     if _has_yq && [[ -n "${_CONFIG_FILE}" ]]; then
-        local value
-        value="$(yq -r ".${key}" "${_CONFIG_FILE}" 2>/dev/null)" || true
+        local value yq_prog
+        yq_prog=".${key} | if type == \"array\" then join(\" \") else . end"
+        value="$(yq -r "${yq_prog}" "${_CONFIG_FILE}" 2>/dev/null)" || true
         if [[ -n "${value}" && "${value}" != "null" ]]; then
             printf "%s" "${value}"
             return 0
@@ -425,21 +455,34 @@ generate_sha256() {
         die "generate_sha256: no sha256sum or shasum command found"
     fi
 
+    local out_name=""
+    if [[ -n "${output_file}" ]]; then
+        out_name="$(basename "${output_file}")"
+    fi
+
     log_debug "Generating SHA256 checksums for: ${path}"
 
     if [[ -d "${path}" ]]; then
-        # Find all regular files in directory
+        # Find all regular files in directory, excluding the checksum file
+        # itself (it would otherwise contain a hash of its own empty state).
+        # Paths are written relative to the directory so that
+        # `sha256sum -c sha256sums.txt` works after download.
         local find_args=()
-        find_args+=("${path}" -type f -not -name "*.sha256" -not -name "*.bak" -not -name ".*")
+        find_args+=("." -type f -not -name "*.sha256" -not -name "*.bak" -not -name ".*")
+        if [[ -n "${out_name}" ]]; then
+            find_args+=(-not -name "${out_name}")
+        fi
         if [[ -n "${output_file}" ]]; then
-            find "${find_args[@]}" -print0 | sort -z | xargs -0 ${sha256_cmd} > "${output_file}"
+            ( cd "${path}" && find "${find_args[@]}" -print0 | sort -z \
+                | xargs -0 -r ${sha256_cmd} | sed 's|  \./|  |' ) > "${output_file}"
             log_info "SHA256 checksums written to: ${output_file}"
         else
-            find "${find_args[@]}" -print0 | sort -z | xargs -0 ${sha256_cmd}
+            ( cd "${path}" && find "${find_args[@]}" -print0 | sort -z \
+                | xargs -0 -r ${sha256_cmd} | sed 's|  \./|  |' )
         fi
     elif [[ -f "${path}" ]]; then
         if [[ -n "${output_file}" ]]; then
-            ${sha256_cmd} "${path}" > "${output_file}"
+            ( cd "$(dirname "${path}")" && ${sha256_cmd} "$(basename "${path}")" ) > "${output_file}"
             log_info "SHA256 checksum written to: ${output_file}"
         else
             ${sha256_cmd} "${path}"
@@ -453,6 +496,41 @@ export -f generate_sha256
 # =============================================================================
 # Manifest Generation
 # =============================================================================
+
+# Escape a string for safe embedding in a JSON document
+# Usage: json_escape "some \"string\""
+json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf "%s" "${s}"
+}
+export -f json_escape
+
+# Convert a space separated list into a JSON array literal
+# Usage: to_json_array "a b c" -> ["a", "b", "c"]
+to_json_array() {
+    local list="${1:-}" item out=""
+    for item in ${list}; do
+        out+="${out:+, }\"$(json_escape "${item}")\""
+    done
+    printf "[%s]" "${out}"
+}
+export -f to_json_array
+
+# Normalise a config value into a JSON boolean literal
+# Usage: to_json_bool "true" -> true
+to_json_bool() {
+    if [[ "$(to_bool "${1:-false}")" == "true" ]]; then
+        printf "true"
+    else
+        printf "false"
+    fi
+}
+export -f to_json_bool
 
 # Generate a JSON manifest for build artifacts
 # Usage: generate_manifest "/path/to/output.json"
@@ -476,35 +554,36 @@ generate_manifest() {
     subtarget="$(get_config_value "target.subtarget" "generic")"
     profile="$(get_config_value "target.profile" "generic")"
 
-    # Gather package lists
+    # Gather package lists (get_config_value joins YAML sequences with spaces)
     local include_packages exclude_packages
-    include_packages="$(get_config_value "packages.include" "")" || true
-    exclude_packages="$(get_config_value "packages.exclude" "")" || true
+    include_packages="$(get_config_value "packages.include" "")"
+    exclude_packages="$(get_config_value "packages.exclude" "")"
 
     # Gather feature flags
     local virtio_enabled virtiofs_enabled p9fs_enabled docker_enabled
-    virtio_enabled="$(get_config_value "features.virtio.enabled" "false")" || true
-    virtiofs_enabled="$(get_config_value "features.virtiofs.enabled" "false")" || true
-    p9fs_enabled="$(get_config_value "features.p9fs.enabled" "false")" || true
-    docker_enabled="$(get_config_value "features.system.docker" "false")" || true
+    virtio_enabled="$(to_json_bool "$(get_config_value "features.virtio.enabled" "false")")"
+    virtiofs_enabled="$(to_json_bool "$(get_config_value "features.virtiofs.enabled" "false")")"
+    p9fs_enabled="$(to_json_bool "$(get_config_value "features.p9fs.enabled" "false")")"
+    docker_enabled="$(to_json_bool "$(get_config_value "features.system.docker" "false")")"
 
     # Get git info if available
     local git_commit="unknown" git_branch="unknown"
     if git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree &>/dev/null; then
-        git_commit="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null)" || true
-        git_branch="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
+        git_commit="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null)" || git_commit="unknown"
+        git_branch="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null)" || git_branch="unknown"
     fi
 
-    # Build JSON (no jq dependency - use heredoc)
+    # Build JSON (no jq dependency - use heredoc). Every interpolated value is
+    # escaped and booleans are normalised so the result is always valid JSON.
     cat > "${output_file}" <<MANIFEST_EOF
 {
-  "version": "${version}",
-  "kernel": "${kernel_version}",
+  "version": "$(json_escape "${version}")",
+  "kernel": "$(json_escape "${kernel_version}")",
   "date": "${build_date}",
   "target": {
-    "arch": "${arch}",
-    "subtarget": "${subtarget}",
-    "profile": "${profile}"
+    "arch": "$(json_escape "${arch}")",
+    "subtarget": "$(json_escape "${subtarget}")",
+    "profile": "$(json_escape "${profile}")"
   },
   "features": {
     "virtio": ${virtio_enabled},
@@ -513,12 +592,12 @@ generate_manifest() {
     "docker": ${docker_enabled}
   },
   "packages": {
-    "include": "$(echo "${include_packages}" | tr ' ' ',')",
-    "exclude": "$(echo "${exclude_packages}" | tr ' ' ',')"
+    "include": $(to_json_array "${include_packages}"),
+    "exclude": $(to_json_array "${exclude_packages}")
   },
   "source": {
-    "commit": "${git_commit}",
-    "branch": "${git_branch}"
+    "commit": "$(json_escape "${git_commit}")",
+    "branch": "$(json_escape "${git_branch}")"
   }
 }
 MANIFEST_EOF
