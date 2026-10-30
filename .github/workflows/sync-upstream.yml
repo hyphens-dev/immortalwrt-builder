@@ -40,16 +40,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! command -v yq >/dev/null 2>&1; then
-            sudo wget -qO /usr/local/bin/yq \
-              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
-            sudo chmod +x /usr/local/bin/yq
-          fi
+          # Same rationale as in build.yml: the runner's pre-installed "yq"
+          # may be the Python jq-wrapper instead of mikefarah's Go tool, in
+          # which case `.source.repo` is parsed as a jq filter and fails.
+          # Use the pinned Node parser (scripts/yq-compatible.mjs) instead.
+          node --version
+          npm ci --no-audit --no-fund
+          cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
 
-          REPO="$(yq -r '.source.repo // ""' config.yml)"
-          BRANCH="$(yq -r '.source.branch // ""' config.yml)"
-          TAG="$(yq -r '.source.tag // ""' config.yml)"
-          AUTO_BUILD="$(yq -r '.sync.auto_build // false' config.yml)"
+          REPO="$(cfg '.source.repo')"
+          BRANCH="$(cfg '.source.branch')"
+          TAG="$(cfg '.source.tag')"
+          AUTO_BUILD="$(cfg '.sync.auto_build')"
 
           [ -n "$REPO" ] || REPO="https://github.com/immortalwrt/immortalwrt.git"
           [ -n "$BRANCH" ] || BRANCH="openwrt-24.10"
@@ -113,6 +115,8 @@ jobs:
       (needs.check-upstream.outputs.auto_build == 'true' || inputs.force_build == true)
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+
       # GITHUB_TOKEN-created repository_dispatch events do NOT start workflows
       # (GitHub suppresses that to avoid recursion). workflow_dispatch via the
       # API does work with `actions: write`.
@@ -122,9 +126,14 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # checkout is needed for config.yml + the Node parser helper
+          node --version
+          npm ci --no-audit --no-fund
+          SOURCE_BRANCH="$(node scripts/yq-compatible.mjs '.source.branch' config.yml | tr -d '\r')"
+          [ -n "$SOURCE_BRANCH" ] || SOURCE_BRANCH="openwrt-24.10"
           gh workflow run build.yml \
             --ref "${{ github.ref_name }}" \
-            -f source_branch="$(yq -r '.source.branch // ""' config.yml 2>/dev/null || echo '')" \
+            -f source_branch="${SOURCE_BRANCH}" \
             -f create_release=true || {
               echo "::warning::Could not dispatch via gh; falling back to repository_dispatch"
               curl -sS -X POST \

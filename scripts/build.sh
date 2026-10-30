@@ -220,18 +220,25 @@ EOF
     fi
 
     # packages.include / packages.exclude from config.yml
+    #
+    # NOTE: the loop variable must be checked against *whitespace-only* input.
+    # If a YAML parser silently returned nothing (e.g. the wrong "yq" flavour
+    # on the runner), an unquoted `for pkg in ${exclude_pkgs}` under `set -u`
+    # expands to the literal string "${exclude_pkgs}" and appends the garbage
+    # line "# CONFIG_PACKAGE_${exclude_pkgs} is not set" to .config, which is
+    # exactly what made `make defconfig` fail building scripts/config/conf.
     local pkg include_pkgs exclude_pkgs
     include_pkgs="$(get_config_value 'packages.include' '')"
     exclude_pkgs="$(get_config_value 'packages.exclude' '')"
 
-    if [[ -n "${include_pkgs}" ]]; then
+    if [[ -n "${include_pkgs//[[:space:]]/}" ]]; then
         log_info "Adding packages from config.yml: ${include_pkgs}"
         for pkg in ${include_pkgs}; do
             echo "CONFIG_PACKAGE_${pkg}=y" >> "${target_config}"
         done
     fi
 
-    if [[ -n "${exclude_pkgs}" ]]; then
+    if [[ -n "${exclude_pkgs//[[:space:]]/}" ]]; then
         log_info "Excluding packages from config.yml: ${exclude_pkgs}"
         for pkg in ${exclude_pkgs}; do
             echo "# CONFIG_PACKAGE_${pkg} is not set" >> "${target_config}"

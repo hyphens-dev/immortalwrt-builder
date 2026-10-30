@@ -114,19 +114,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Use the pre-installed yq (ubuntu-24.04 runner image ships one);
-          # fall back to a pinned download to keep builds reproducible.
-          if ! command -v yq >/dev/null 2>&1; then
-            sudo wget -qO /usr/local/bin/yq \
-              https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
-            sudo chmod +x /usr/local/bin/yq
-          fi
-          yq --version
+          # IMPORTANT: ubuntu-24.04 runners ship *two* unrelated tools named
+          # "yq" (the Python jq-wrapper pre-installed via pip, and mikefarah's
+          # Go binary bundled with snapd). Depending on PATH order, a query
+          # like `yq '.source.repo'` may be interpreted as a jq filter against
+          # JSON and fail silently - which previously produced empty build
+          # configuration. Use the pinned Node parser instead (same one
+          # scripts/build.sh uses), so there is exactly one YAML dialect.
+          node --version
+          npm ci --no-audit --no-fund
 
-          # yq prints the literal string "null" for an absent key, so strip it.
-          # grep exits 1 when nothing is left, hence the `|| true`.
-          cfg() { yq -r "$1 // \"\"" config.yml 2>/dev/null \
-                    | tr -d '\r' | grep -vx null || true; }
+          # Prints nothing for absent keys (mikefarah-compatible subset).
+          cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
 
           SOURCE_REPO="${INPUT_SOURCE_REPO:-$(cfg '.source.repo')}"
           SOURCE_BRANCH="${INPUT_SOURCE_BRANCH:-$(cfg '.source.branch')}"
