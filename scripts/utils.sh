@@ -128,9 +128,79 @@ export -f setup_error_trap
 # Config Parsing
 # =============================================================================
 
-# Detect if yq is available
-_has_yq() {
-    command -v yq &>/dev/null
+# Locate a yaml-parser helper.
+#
+# IMPORTANT: ubuntu-24.04 GitHub runners ship *two* different tools named "yq":
+#   1. the Python jq-wrapper yq (pre-installed in the runner image), and
+#   2. mikefarah's Go yq (bundled with snapd, which is also pre-installed).
+# Whichever ends up first in PATH decides which YAML dialect `yq '.a.b'`
+# speaks - python-yq would interpret that as a *jq* filter and fail silently
+# here, leaving packages.include / packages.exclude empty so that build.sh
+# later appended a garbage "# CONFIG_PACKAGE_... is not set" line to .config
+# and `make defconfig` blew up while building scripts/config/conf.
+#
+# Therefore config.yml is parsed with Node.js (the workflow installs Node 20)
+# via scripts/yq-compatible.mjs, which mimics the mikefarah syntax we use.
+# If node is unavailable we fall back to mikefarah's yq only after verifying
+# its banner ("yq (https://mikefarah...)"), never the python wrapper.
+_YQ_RESOLVED=false
+_YQ_BIN=""
+
+_config_parser_init() {
+    if [[ "${_YQ_RESOLVED}" == "true" ]]; then
+        return 0
+    fi
+    _YQ_RESOLVED=true
+    if has_command node; then
+        if [[ -f "${SCRIPT_DIR}/yq-compatible.mjs" ]]; then
+            _YQ_BIN="node-mjs"
+            return 0
+        fi
+    fi
+    if has_command yq; then
+        if yq --version 2>/dev/null | grep -q 'mikefarah'; then
+            _YQ_BIN="yq-go"
+            return 0
+        fi
+        log_warn "Found a non-mikefarah 'yq' in PATH - ignoring it for config parsing"
+    fi
+    _YQ_BIN=""
+    return 0
+}
+
+# mikefarah-style value query: `yq -r '<expr>' <file>` semantics, printed to
+# stdout. Absent keys print nothing (callers treat "" as missing).
+_yaml_value() {
+    local expr="$1" file="$2"
+    case "${_YQ_BIN}" in
+        node-mjs)
+            node "${SCRIPT_DIR}/yq-compatible.mjs" "${expr}" "${file}" || true
+            ;;
+        yq-go)
+            yq -r "${expr}" "${file}" 2>/dev/null || true
+            ;;
+        *)
+            printf ''
+            ;;
+    esac
+}
+
+# Flatten a YAML file into "dot.path=value" lines (one per leaf scalar;
+# sequences of scalars are joined with spaces under their own path).
+_flatten_yaml() {
+    local file="$1"
+    case "${_YQ_BIN}" in
+        node-mjs)
+            node "${SCRIPT_DIR}/yq-compatible.mjs" --dump "${file}" || true
+            ;;
+        yq-go)
+            yq -r '.. | select(tag == "!!str" or tag == "!!int" or tag == "!!bool" or tag == "!!float") | (path | join(".")) + "=" + .' \
+                "${file}" 2>/dev/null || true
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 }
 
 # Parse config.yml and store values for quick lookup
@@ -150,14 +220,18 @@ parse_config() {
     _CONFIG_FILE="${config_file}"
     _CONFIG_CACHE=()
 
-    if _has_yq; then
-        # Use yq for reliable YAML parsing
-        # Extract all leaf key paths and their values
+    _config_parser_init
+
+    if [[ "${_YQ_BIN}" != "" ]]; then
+        # Reliable YAML parsing via the mikefarah-compatible parser: flatten
+        # every leaf key path to "path=value" (sequences are joined with
+        # spaces, exactly like the old `yq '... | join(" ")'` logic did).
         while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
             local key="${line%%=*}"
             local value="${line#*=}"
             _CONFIG_CACHE["${key}"]="${value}"
-        done < <(yq -r '.. | select(tag == "!!str" or tag == "!!int" or tag == "!!bool" or tag == "!!float") | (path | join(".")) + "=" + . ' "${config_file}" 2>/dev/null)
+        done < <(_flatten_yaml "${config_file}")
     else
         # Fallback: indentation-aware parser for the YAML subset used by this
         # project (nested maps + flat lists of scalars). Requires bash 4.2+.
@@ -278,12 +352,11 @@ get_config_value() {
         parse_config
     fi
 
-    # Try yq first for nested lookups if available.
+    # Try the YAML parser first for nested lookups if available.
     # Sequences are joined with spaces so callers always get a scalar back.
-    if _has_yq && [[ -n "${_CONFIG_FILE}" ]]; then
-        local value yq_prog
-        yq_prog=".${key} | if type == \"array\" then join(\" \") else . end"
-        value="$(yq -r "${yq_prog}" "${_CONFIG_FILE}" 2>/dev/null)" || true
+    if [[ "${_YQ_BIN}" != "" && -n "${_CONFIG_FILE}" ]]; then
+        local value
+        value="$(_yaml_value ".${key} | if type == \"array\" then join(\" \") else . end" "${_CONFIG_FILE}")"
         if [[ -n "${value}" && "${value}" != "null" ]]; then
             printf "%s" "${value}"
             return 0
