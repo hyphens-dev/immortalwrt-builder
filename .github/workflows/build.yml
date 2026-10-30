@@ -109,6 +109,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cache the npm cache directory itself (contents are content-addressed,
+      # so a fixed key is safe and saves the download on every run).
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: npm-
+
       - name: Read config.yml
         id: cfg
         run: |
@@ -197,6 +206,15 @@ jobs:
       - name: Checkout builder repository
         uses: actions/checkout@v4
 
+      # Share the npm cache with the prepare job so `npm ci` in scripts and
+      # any future node tooling never re-downloads packages.
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: npm-
+
       - name: Free disk space
         run: |
           # An x86_64 + LuCI build needs ~25-30 GB; the runner only has ~14 GB
@@ -254,6 +272,42 @@ jobs:
           restore-keys: |
             dl-${{ needs.prepare.outputs.arch }}-
 
+      # ── Toolchain reuse ──────────────────────────────────────────────
+      # ccache turns a rebuild of the same upstream commit from ~3h into
+      # well under 1h; the OpenWrt staging_dir tree itself is far larger
+      # than the 10 GB per-cache limit, so we persist only:
+      #   * ~/.ccache  (compiler cache, keyed by target + restore-keys prefix)
+      #   * dl/        (source downloads, cached above)
+      - name: Install ccache
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends ccache
+          ccache --version | head -1
+
+      - name: Restore ccache
+        if: ${{ inputs.clean_build != true }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ needs.prepare.outputs.board }}-${{ needs.prepare.outputs.subtarget }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ needs.prepare.outputs.board }}-${{ needs.prepare.outputs.subtarget }}-
+
+      - name: Configure ccache
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ccache"
+          {
+            echo 'max_size = 1.5G'
+            echo 'compiler_check = content'
+            echo 'compression = true'
+            echo 'compression_level = 6'
+          } > "$HOME/.ccache/ccache.conf"
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          # Prepend the ccache symlinks dir so cc/gcc resolve through ccache
+          # even when OpenWrt invokes absolute compiler paths during prereq.
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+
       # The OpenWrt staging_dir/tmp tree is far larger than the 10 GB cache
       # limit, so only the toolchain download cache above is persisted.
 
@@ -283,6 +337,10 @@ jobs:
           chmod +x scripts/*.sh
           ./scripts/build.sh
 
+      - name: Report ccache stats
+        if: always()
+        run: ccache --show-stats || true
+
       - name: Name artifact
         id: artifact
         if: always()
@@ -302,18 +360,23 @@ jobs:
 
       - name: Record built upstream commit
         if: steps.build_step.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          printf '%s\n' "${SOURCE_COMMIT}" > .upstream-built
-          # Push the marker so sync-upstream.yml sees it next run. Non-fatal if
-          # the workflow token is read-only.
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add .upstream-built
-          git commit -m "chore: record built upstream commit ${SOURCE_COMMIT:0:12}" || true
-          git push || echo "::warning::Could not push .upstream-built (token may be read-only)"
+          # Publish the build marker as an ARTIFACT instead of pushing a file
+          # to main: pushing from CI races with concurrent runs and requires
+          # write tokens; artifacts are atomic, per-run, and can be downloaded
+          # by sync-upstream.yml via the GitHub API (see that workflow).
+          mkdir -p "$RUNNER_TEMP/marker"
+          printf '%s\n' "${SOURCE_COMMIT}" > "$RUNNER_TEMP/marker/.upstream-built"
+      - name: Upload build marker
+        if: steps.build_step.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-built-marker
+          path: ${{ runner.temp }}/marker/.upstream-built
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Upload firmware artifact
         if: always()

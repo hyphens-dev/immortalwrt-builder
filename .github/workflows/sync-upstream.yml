@@ -37,6 +37,9 @@ jobs:
 
       - name: Resolve upstream and compare
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -68,10 +71,23 @@ jobs:
             exit 1
           fi
 
-          # The last commit this repo successfully built is recorded in the
-          # build record file (written by the previous successful run).
+          # The last upstream commit that was successfully built is published
+          # by build.yml as the `upstream-built-marker` artifact (NOT pushed to
+          # main - pushing from CI races with concurrent runs). Download the
+          # most recent marker via the API; fall back to a committed
+          # .upstream-built file for older branches.
           LAST_BUILT=""
-          if [ -f .upstream-built ]; then
+          ART_ID="$(gh api "repos/${GH_REPO}/actions/artifacts?name=upstream-built-marker&per_page=1"                      --jq '.artifacts[0].id // empty' 2>/dev/null || true)"
+          if [ -n "${ART_ID}" ]; then
+            TMP="$(mktemp -d)"
+            if gh api "repos/${GH_REPO}/actions/artifacts/${ART_ID}/zip" > "${TMP}/marker.zip" 2>/dev/null \
+               && unzip -o -q "${TMP}/marker.zip" -d "${TMP}" \
+               && [ -f "${TMP}/.upstream-built" ]; then
+              LAST_BUILT="$(tr -d '[:space:]' < "${TMP}/.upstream-built")"
+            fi
+            rm -rf "${TMP}"
+          fi
+          if [ -z "${LAST_BUILT}" ] && [ -f .upstream-built ]; then
             LAST_BUILT="$(tr -d '[:space:]' < .upstream-built)"
           fi
 

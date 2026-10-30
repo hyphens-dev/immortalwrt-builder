@@ -31,14 +31,25 @@ CI installs (see `.github/workflows/build.yml`).
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `build.yml` | push to `main`, manual, `workflow_dispatch`, `repository_dispatch` | Builds firmware, uploads artifacts, publishes a release |
+| `lint.yml` | every PR / push to `main` | shellcheck + actionlint + parser unit tests (fast CI-sanity feedback) |
+| `build.yml` | push to `main`, manual, `workflow_dispatch`, `repository_dispatch` | Builds firmware (ccache + dl caches), uploads artifacts, publishes a release |
 | `sync-upstream.yml` | daily 02:00 UTC, manual | Detects new upstream commits and triggers `build.yml` |
 | `cleanup.yml` | weekly Sunday 00:00 UTC, manual | Deletes old runs, artifacts and releases |
 
 `sync-upstream.yml` deliberately does **not** rebase this repository onto
 ImmortalWrt — the two repos share no history and the source tree is several
-gigabytes. Each build clones upstream fresh and records the built commit in
-`.upstream-built`.
+gigabytes. Each build clones upstream fresh; the successfully-built upstream
+commit is published as the `upstream-built-marker` artifact (never pushed to
+`main`, which would race with concurrent builds). Local runs may still use
+`.upstream-built` via `scripts/sync.sh --record`.
+
+### YAML parsing in CI
+
+The runner image ships two unrelated tools named `yq`, so **nothing parses
+`config.yml` with bare `yq` anymore**. All workflows and `scripts/utils.sh`
+use `scripts/yq-compatible.mjs` — a deterministic Node.js reader pinned by
+`package.json`/`package-lock.json` (`npm ci` installs it; covered by
+`npm test`).
 
 ## Configuration
 
@@ -51,7 +62,7 @@ Everything lives in [`config.yml`](config.yml). Honest notes about the limits:
 | `kernel.version` | **Metadata only** (24.10 ships 6.6 for x86) |
 | `kernel.lto` | Real — maps to `CONFIG_USE_LTO` |
 | `kernel.cpu_opt`, `kernel.optimization` | **Not applied** — OpenWrt x86 has no `-march` symbol. See [docs/cpu-tuning.md](docs/cpu-tuning.md) |
-| `features.virtio.*` | Informational — drivers are built-in |
+| `features.virtio.*` | Selects matching `kmod-virtio-*` packages (drivers are also built into the x86 kernel) |
 | `features.virtiofs.enabled` | Real — selects `kmod-fs-virtiofs` + `kmod-fuse` |
 | `features.p9fs.enabled` | Real |
 | `features.network.wireguard` / `.nftables` | Real |
@@ -60,7 +71,7 @@ Everything lives in [`config.yml`](config.yml). Honest notes about the limits:
 | `features.proxy.smartdns` | Real |
 | `features.system.docker` | Real |
 | `packages.include` / `packages.exclude` | Appended to `.config` after `defconfig` inputs |
-| `build.timeout` | Per-attempt timeout, minutes (default 350; GitHub caps a job at 360) |
+| `build.timeout` | Per-attempt timeout, minutes (default 330; must stay below the 360-minute GitHub job cap minus clone/setup overhead) |
 | `output.*` | **Globs**, not file names (images are version-prefixed) |
 
 `.config` is assembled in this order:
@@ -70,13 +81,16 @@ Everything lives in [`config.yml`](config.yml). Honest notes about the limits:
 3. `config/packages.config` — `CONFIG_PACKAGE_*` selections
 4. Feature toggles from `config.yml`
 5. `packages.include` / `packages.exclude`
-6. `make defconfig` (after feeds are installed)
+6. `make olddefconfig` (after feeds are installed) — symbols that kconfig
+   cannot resolve are reported as *config drift* instead of being silently
+   dropped; set `BUILD_STRICT_CONFIG=true` to fail the build on any drift
 
 ## Project layout
 
 ```
 .
 ├── .github/workflows/
+│   ├── lint.yml              # shellcheck / actionlint / node tests
 │   ├── build.yml             # build + release
 │   ├── sync-upstream.yml     # detect upstream, trigger build
 │   └── cleanup.yml           # retention
@@ -96,7 +110,11 @@ Everything lives in [`config.yml`](config.yml). Honest notes about the limits:
 │   ├── patch.sh              # patch application
 │   ├── sync.sh               # local upstream check
 │   ├── release.sh            # local release prep
-│   └── utils.sh              # config parsing, logging, manifest
+│   ├── utils.sh              # config parsing, logging, manifest
+│   └── yq-compatible.mjs     # deterministic YAML reader (replaces `yq`)
+├── tests/
+│   └── yq-compatible.test.mjs# parser smoke tests (`npm test`)
+├── package.json              # pins the `yaml` dependency
 ├── docs/
 │   ├── virtiofs.md
 │   ├── cpu-tuning.md

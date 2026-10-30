@@ -36,18 +36,15 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 
-// Prefer the workspace `yaml` package; fall back to js-yaml if present.
+// Single pinned YAML parser ("yaml" from package.json / package-lock.json).
+// The former js-yaml fallback was removed so there is exactly one parser and
+// one lockfile dependency tree to audit.
 let parseYaml;
 try {
   ({ parse: parseYaml } = require('yaml'));
 } catch {
-  try {
-    const jsyaml = require('js-yaml');
-    parseYaml = (text) => jsyaml.load(text);
-  } catch {
-    console.error('yq-compatible.mjs: neither "yaml" nor "js-yaml" is installed (run: npm ci)');
-    process.exit(2);
-  }
+  console.error('yq-compatible.mjs: the "yaml" package is not installed (run: npm ci)');
+  process.exit(2);
 }
 
 function usage() {
