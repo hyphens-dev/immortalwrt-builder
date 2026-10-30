@@ -8,9 +8,8 @@
 source:
   repo: "https://github.com/immortalwrt/immortalwrt.git"
   branch: "openwrt-24.10"
-  # Optional: pin an exact tag or commit instead of tracking the branch
+  # Optional: pin an exact tag instead of tracking the branch
   # tag: "v24.10.0"
-  # commit: "abc123def456"
 
 # Target Configuration
 # IMPORTANT: OpenWrt x86 has board=x86 and subtarget=64, so build output lands
@@ -38,8 +37,11 @@ kernel:
 # Feature Switches
 features:
   # VirtIO (PVE/KVM paravirtual devices)
-  # The drivers are built into the x86/64 target kernel, so these toggles are
-  # informational only - there is nothing to select in .config.
+  # The drivers are built into the x86/64 target kernel, so `enabled` is
+  # reported in manifest.json; the sub-toggles below are consumed by
+  # scripts/build.sh and translated into kmod package selections where an
+  # OpenWrt symbol exists (net -> kmod-virtio-net, block -> kmod-virtio-blk,
+  # ...). They also make the intent explicit for future kernel configs.
   virtio:
     enabled: true
     net: true
@@ -108,19 +110,24 @@ packages:
 
 # Release Configuration
 release:
-  enabled: true
+  # Keep only keys that are actually consumed:
+  #   keep_releases -> cleanup.yml (prunes old releases + tags)
+  #   changelog     -> release job body includes upstream change notes
+  # (the former `enabled`, `upload` and `cleanup_artifacts` keys were dead
+  #  configuration - publishing is controlled by the workflow trigger and
+  #  artifact retention lives in build.yml / cleanup.yml.)
   keep_releases: 10
-  cleanup_artifacts: true
   changelog: true
-  upload: true
 
 # Build Configuration
 build:
   # Parallel jobs (0 = nproc)
   jobs: 0
-  # Hard per-attempt timeout in minutes. A full x86_64 + LuCI build on a
-  # 4-core GitHub runner regularly needs 3-4h.
-  timeout: 350
+  # Hard per-attempt timeout in minutes. Must stay BELOW the GitHub job
+  # budget (timeout-minutes: 360 in build.yml) minus ~20 minutes of
+  # clone/feeds/setup overhead, otherwise the runner kills the job before
+  # this timeout can produce a clean error + logs.
+  timeout: 330
   retry: false
   max_retries: 1
   verbose: false

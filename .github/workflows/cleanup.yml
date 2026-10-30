@@ -32,8 +32,15 @@ jobs:
       - id: cfg
         run: |
           set -euo pipefail
-          KEEP_RELEASES="$(grep -E '^[[:space:]]+keep_releases:' config.yml | head -1 | awk '{print $2}')"
+          # Same deterministic YAML path as every other workflow (no bare `yq`,
+          # no grep/awk line parsing that breaks on comments or quoting).
+          npm ci --no-audit --no-fund
+          KEEP_RELEASES="$(node scripts/yq-compatible.mjs '.release.keep_releases' config.yml | tr -d '\r')"
           [ -n "${KEEP_RELEASES:-}" ] || KEEP_RELEASES="${DEFAULT_KEEP_RELEASES}"
+          if ! [[ "${KEEP_RELEASES}" =~ ^[0-9]+$ ]]; then
+            echo "::error::release.keep_releases is not a number: '${KEEP_RELEASES}'"
+            exit 1
+          fi
           echo "keep_releases=${KEEP_RELEASES}" >> "$GITHUB_OUTPUT"
           echo "keep_runs=${DEFAULT_KEEP_RUNS}" >> "$GITHUB_OUTPUT"
 

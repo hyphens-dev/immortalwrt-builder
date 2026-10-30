@@ -1,0 +1,55 @@
+name: Lint
+
+# Fast feedback for the parts of this repo that are code, not firmware:
+# shell scripts, workflow YAML and the Node helpers. Runs on every PR so CI
+# compile errors (like the unterminated-quote / yq-ambiguity regressions)
+# surface minutes after the push instead of three hours into a build.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: Shell scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: |
+          set -euo pipefail
+          # SC1091: sourced files resolved at runtime; SC2064: intentional
+          # immediate trap expansion.
+          shellcheck -S warning -e SC1091,SC2064 scripts/*.sh
+          bash -n scripts/*.sh
+
+  workflows:
+    name: Workflow YAML
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        # Downloaded rather than committed to keep the repo free of binaries.
+        run: |
+          set -euo pipefail
+          ver=1.7.7
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${ver}/actionlint_${ver}_linux_amd64.tar.gz" \
+            | tar xz -C "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" -color .github/workflows/*.yml
+
+  node:
+    name: Parser unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
