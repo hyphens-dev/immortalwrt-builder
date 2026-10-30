@@ -11,8 +11,10 @@ set -euo pipefail
 # =============================================================================
 # Global Constants
 # =============================================================================
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly PROJECT_ROOT
 readonly CONFIG_DEFAULT="${PROJECT_ROOT}/config.yml"
 readonly COLOR_RESET="\033[0m"
 
@@ -24,18 +26,22 @@ if [[ -t 1 ]] && command -v tput &>/dev/null && [[ $(tput colors 2>/dev/null || 
     readonly COLOR_RED="\033[0;31m"
     readonly COLOR_GREEN="\033[0;32m"
     readonly COLOR_YELLOW="\033[0;33m"
+    # shellcheck disable=SC2034  # consumed by external callers sourcing utils.sh
     readonly COLOR_BLUE="\033[0;34m"
     readonly COLOR_CYAN="\033[0;36m"
     readonly COLOR_BOLD="\033[1m"
+    # shellcheck disable=SC2034  # consumed by external callers sourcing utils.sh
     readonly COLOR_DIM="\033[2m"
 else
     _COLOR_ENABLED=false
     readonly COLOR_RED=""
     readonly COLOR_GREEN=""
     readonly COLOR_YELLOW=""
+    # shellcheck disable=SC2034  # consumed by external callers sourcing utils.sh
     readonly COLOR_BLUE=""
     readonly COLOR_CYAN=""
     readonly COLOR_BOLD=""
+    # shellcheck disable=SC2034  # consumed by external callers sourcing utils.sh
     readonly COLOR_DIM=""
 fi
 
@@ -210,6 +216,7 @@ declare -gA _CONFIG_CACHE=()
 declare -g _CONFIG_PARSED=false
 declare -g _CONFIG_FILE=""
 
+# shellcheck disable=SC2120  # called with an explicit file in some contexts
 parse_config() {
     local config_file="${1:-${CONFIG_DEFAULT}}"
 
@@ -410,7 +417,8 @@ backup_file() {
         return 0
     fi
 
-    local backup_path="${file}.$(date +%Y%m%d%H%M%S).bak"
+    local backup_path
+    backup_path="${file}.$(date +%Y%m%d%H%M%S).bak"
     cp -a "${file}" "${backup_path}" || die "Failed to backup: ${file}"
     log_info "Backed up: ${file} -> ${backup_path}"
     printf "%s" "${backup_path}"
