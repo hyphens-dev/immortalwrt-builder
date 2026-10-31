@@ -371,7 +371,7 @@ download_feeds() {
 compile_firmware() {
     log_info "Starting firmware compilation..."
 
-    local jobs timeout_minutes attempts max_attempts
+    local jobs timeout_minutes max_attempts
     jobs="$(get_config_value 'build.jobs' '0')"
     if [[ "${jobs}" == "0" || -z "${jobs}" ]]; then
         jobs="$(get_cpu_count)"

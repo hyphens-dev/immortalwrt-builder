@@ -82,9 +82,11 @@ jobs:
             deleted=$((deleted + 1))
           done
 
-          echo "### Workflow runs" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "${deleted} run(s) ${DRY_RUN:+processed}$([ "${DRY_RUN}" = "true" ] && echo ' (dry run)')." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Workflow runs"
+            echo ""
+            echo "${deleted} run(s) ${DRY_RUN:+processed}$([ "${DRY_RUN}" = "true" ] && echo ' (dry run)')."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   cleanup-artifacts:
     name: Delete old artifacts
@@ -123,9 +125,11 @@ jobs:
             deleted=$((deleted + 1))
           done
 
-          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "${deleted} artifact(s) older than ${DAYS} days processed." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Artifacts"
+            echo ""
+            echo "${deleted} artifact(s) older than ${DAYS} days processed."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   cleanup-releases:
     name: Delete old releases
@@ -167,9 +171,11 @@ jobs:
             deleted=$((deleted + 1))
           done
 
-          echo "### Releases" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "${deleted} release(s) processed (tags removed too)." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Releases"
+            echo ""
+            echo "${deleted} release(s) processed (tags removed too)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   summary:
     name: Cleanup Summary

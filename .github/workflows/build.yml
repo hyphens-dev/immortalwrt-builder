@@ -430,9 +430,11 @@ jobs:
           VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 'v0')"
           DATE="$(date -u +%Y%m%d)"
           TAG="${VERSION}-build.${GITHUB_RUN_NUMBER}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "name=ImmortalWrt PVE ${TAG}" >> "$GITHUB_OUTPUT"
-          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${TAG}"
+            echo "name=ImmortalWrt PVE ${TAG}"
+            echo "date=${DATE}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Collect release files
         run: |
