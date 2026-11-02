@@ -109,6 +109,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin the Node major version explicitly. Without setup-node the job
+      # silently depends on whatever Node happens to be preinstalled in the
+      # runner image; if it were removed or changed, every call to
+      # scripts/yq-compatible.mjs would fail ("yaml package is not installed")
+      # because the parser could not even start.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       # Cache the npm cache directory itself (contents are content-addressed,
       # so a fixed key is safe and saves the download on every run).
       - name: Cache npm downloads
@@ -117,6 +127,21 @@ jobs:
           path: ~/.npm
           key: npm-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-
+
+      # Install dependencies *before* any step that shells out to
+      # scripts/yq-compatible.mjs. `npm ci` requires both package.json and
+      # package-lock.json to be present and in sync; if either is missing
+      # (or the lockfile was regenerated), fall back to `npm install` so the
+      # "yaml" dependency always exists before the first parse attempt.
+      - name: Install npm dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          node -e "require('yaml'); console.log('yaml dependency OK')"
 
       - name: Read config.yml
         id: cfg
@@ -130,8 +155,13 @@ jobs:
           # JSON and fail silently - which previously produced empty build
           # configuration. Use the pinned Node parser instead (same one
           # scripts/build.sh uses), so there is exactly one YAML dialect.
+          # Dependencies were installed by the "Install npm dependencies"
+          # step above; this check makes any drift fail here, not mid-parse.
           node --version
-          npm ci --no-audit --no-fund
+          node -e "require('yaml')" || {
+            echo "::error::the 'yaml' package is missing; npm install did not run or failed"
+            exit 1
+          }
 
           # Prints nothing for absent keys (mikefarah-compatible subset).
           cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
