@@ -35,6 +35,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin Node explicitly so the YAML parser helper never depends on the
+      # runner image's preinstalled tooling.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Install dependencies *before* any step that runs
+      # scripts/yq-compatible.mjs; fall back to `npm install` if the lockfile
+      # is missing or out of sync (a bare failing `npm ci` here previously
+      # produced "the \"yaml\" package is not installed" errors downstream).
+      - name: Install npm dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          node -e "require('yaml'); console.log('yaml dependency OK')"
+
       - name: Resolve upstream and compare
         id: check
         env:
@@ -47,8 +68,13 @@ jobs:
           # may be the Python jq-wrapper instead of mikefarah's Go tool, in
           # which case `.source.repo` is parsed as a jq filter and fails.
           # Use the pinned Node parser (scripts/yq-compatible.mjs) instead.
+          # Dependencies come from the "Install npm dependencies" step above;
+          # verify before the first parse so failures are attributable.
           node --version
-          npm ci --no-audit --no-fund
+          node -e "require('yaml')" || {
+            echo "::error::the 'yaml' package is missing; npm install did not run or failed"
+            exit 1
+          }
           cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
 
           REPO="$(cfg '.source.repo')"
@@ -133,18 +159,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GITHUB_TOKEN-created repository_dispatch events do NOT start workflows
-      # (GitHub suppresses that to avoid recursion). workflow_dispatch via the
-      # API does work with `actions: write`.
+      # Pin Node + install dependencies before the first parser call, so a
+      # missing/stale lockfile cannot surface later as
+      # 'yq-compatible.mjs: the "yaml" package is not installed'.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install npm dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          node -e "require('yaml'); console.log('yaml dependency OK')"
+
       - name: Dispatch build workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # checkout is needed for config.yml + the Node parser helper
+          # checkout is needed for config.yml + the Node parser helper;
+          # dependencies were installed by the "Install npm dependencies"
+          # step above, so just verify here.
           node --version
-          npm ci --no-audit --no-fund
+          node -e "require('yaml')" || {
+            echo "::error::the 'yaml' package is missing; npm install did not run or failed"
+            exit 1
+          }
           SOURCE_BRANCH="$(node scripts/yq-compatible.mjs '.source.branch' config.yml | tr -d '\r')"
           [ -n "$SOURCE_BRANCH" ] || SOURCE_BRANCH="openwrt-24.10"
           gh workflow run build.yml \
