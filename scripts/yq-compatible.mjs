@@ -31,72 +31,21 @@
 // parser.
 // =============================================================================
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
 // Single pinned YAML parser ("yaml" from package.json / package-lock.json).
 // The former js-yaml fallback was removed so there is exactly one parser and
 // one lockfile dependency tree to audit.
-//
-// Resolution order:
-//   1. Normal Node resolution finds node_modules/yaml when `npm ci` has been
-//      run in the repository root (the documented path, used by lint.yml).
-//   2. Otherwise install it on demand into a persistent per-user cache dir
-//      (~/.cache/yq-compatible/node_modules) with `npm install --no-save
-//      yaml@<pinned version read from package-lock.json>`. This keeps every
-//      workflow that shells out to this helper working even if a runner or a
-//      checkout step did not perform the npm install first - previously that
-//      produced "yq-compatible.mjs: the \"yaml\" package is not installed
-//      (run: npm ci)" and failed the whole CI job.
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = dirname(here);
-const LOCK_VERSION_RE = /"node_modules\/yaml":\s*\{\s*"version":\s*"([^"]+)"/;
-
-function pinnedVersion() {
-  try {
-    const lock = readFileSync(join(repoRoot, 'package-lock.json'), 'utf8');
-    const m = LOCK_VERSION_RE.exec(lock);
-    if (m) return m[1];
-  } catch { /* fall through */ }
-  // Same range as package.json ("^2.9.1"); keep in sync.
-  return '2.9.1';
+let parseYaml;
+try {
+  ({ parse: parseYaml } = require('yaml'));
+} catch {
+  console.error('yq-compatible.mjs: the "yaml" package is not installed (run: npm ci)');
+  process.exit(2);
 }
-
-function ensureYaml() {
-  try {
-    return require('yaml');
-  } catch { /* not installed yet - provision below */ }
-
-  const cacheDir = join(process.env.XDG_CACHE_HOME || join(process.env.HOME || '/tmp', '.cache'),
-                        'yq-compatible');
-  const nmDir = join(cacheDir, 'node_modules');
-  if (!existsSync(join(nmDir, 'yaml'))) {
-    const { execFileSync } = require('node:child_process');
-    const version = pinnedVersion();
-    try {
-      execFileSync('npm', ['install', '--prefix', cacheDir, '--no-save',
-                           '--no-audit', '--no-fund', '--loglevel=warn', `yaml@${version}`],
-                   { stdio: ['ignore', 'ignore', 'inherit'], timeout: 180000 });
-    } catch {
-      console.error('yq-compatible.mjs: could not auto-install the "yaml" package'
-                    + ' (run: npm ci in the repository root)');
-      process.exit(2);
-    }
-  }
-  try {
-    return createRequire(join(cacheDir, 'noop.js'))('yaml');
-  } catch {
-    console.error('yq-compatible.mjs: the "yaml" package is not available'
-                  + ' (run: npm ci in the repository root)');
-    process.exit(2);
-  }
-}
-
-const { parse: parseYaml } = ensureYaml();
 
 function usage() {
   console.error('usage: yq-compatible.mjs (--dump | "<.dot.path>[ | if type == array ...]") <file>');
