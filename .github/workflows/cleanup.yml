@@ -29,12 +29,27 @@ jobs:
       keep_runs: ${{ steps.cfg.outputs.keep_runs }}
     steps:
       - uses: actions/checkout@v4
+
+      # scripts/yq-compatible.mjs needs the pinned `yaml` package; without a
+      # declared Node runtime + install it aborts with
+      # 'the "yaml" package is not installed' and this job fails.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - id: cfg
         run: |
           set -euo pipefail
           # Same deterministic YAML path as every other workflow (no bare `yq`,
           # no grep/awk line parsing that breaks on comments or quoting).
           npm ci --no-audit --no-fund
+          test -d node_modules/yaml || {
+            echo '::error::npm ci did not install node_modules/yaml (lockfile out of sync? run `npm install` and commit package-lock.json)'
+            exit 1
+          }
           KEEP_RELEASES="$(node scripts/yq-compatible.mjs '.release.keep_releases' config.yml | tr -d '\r')"
           [ -n "${KEEP_RELEASES:-}" ] || KEEP_RELEASES="${DEFAULT_KEEP_RELEASES}"
           if ! [[ "${KEEP_RELEASES}" =~ ^[0-9]+$ ]]; then
