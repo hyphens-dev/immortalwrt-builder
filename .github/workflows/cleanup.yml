@@ -1,0 +1,31 @@
+name: Cleanup
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'   # 每周日 00:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Delete old workflow runs (keep last 15)
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 30
+          keep_minimum_runs: 15
+
+      - name: Delete old releases (keep last 5)
+        uses: dev-drprasad/delete-older-releases@v0.3.2
+        id: delete_releases
+        with:
+          keep_latest: 5
+          delete_tags: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

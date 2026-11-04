@@ -1,0 +1,26 @@
+# network — ImmortalWrt PVE Builder rootfs overlay
+# @LAN_IP@ / @HOSTNAME@ 由 scripts/build.sh 依据 config.yml 渲染。
+# eth0 = PVE virtio-net 网卡，默认静态 LAN；如需 DHCP 把 proto 改为 dhcp。
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0'
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option ula_prefix 'fdp0:5ee:dead::/48'
+	option packet_steering '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '@LAN_IP@'
+	option netmask '255.255.255.0'
+	option ip6assign '60'
+	option delegate '0'

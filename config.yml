@@ -1,0 +1,124 @@
+# ImmortalWrt PVE Builder Configuration
+# ========================================
+# 所有键值均由 scripts/utils.sh + scripts/build.sh 以及 GitHub Actions 工作流消费。
+# OpenWrt 实际无法生效的选项会被如实标注，而不是被静默忽略。
+
+# ---------------------------------------------------------------------------
+# 源码配置
+# ---------------------------------------------------------------------------
+source:
+  repo: "https://github.com/immortalwrt/immortalwrt.git"
+  branch: "openwrt-24.10"
+  # 可选：固定某个 tag 而不跟随分支
+  # tag: "v24.10.0"
+
+# ---------------------------------------------------------------------------
+# 目标配置
+# IMPORTANT: OpenWrt x86 的 board=x86、subtarget=64，因此构建产物位于
+# bin/targets/x86/64/ —— 而不是 bin/targets/x86_64/generic/。
+# ---------------------------------------------------------------------------
+target:
+  arch: "x86_64"       # 展示 / 包架构 (pkgArch)
+  board: "x86"         # target/linux/<board>
+  subtarget: "64"      # target/linux/<board>/<subtarget>
+  profile: "generic"   # 设备 profile
+
+# ---------------------------------------------------------------------------
+# 内核配置
+# ---------------------------------------------------------------------------
+kernel:
+  # 仅元数据：openwrt-24.10 的 x86 目标固定使用 Linux 6.6
+  # （见 target/linux/x86/Makefile: KERNEL_PATCHVER:=6.6）。
+  version: "6.6"
+  # Link-Time Optimization: on/off -> CONFIG_USE_LTO
+  lto: "off"
+  # NOTE: OpenWrt x86 没有 -march/-O2..-O3 tuning 的 Kconfig 符号；
+  # 如需真正的 CPU 调优请修改 include/target.mk（见 docs/pve-tuning.md）。
+  cpu_opt: "x86-64"
+  optimization: "performance"
+
+# ---------------------------------------------------------------------------
+# 功能开关
+# ---------------------------------------------------------------------------
+features:
+  # VirtIO（PVE/KVM 半虚拟化设备）
+  # virtio-net/-blk/-scsi/-balloon/-rng/-console/-mmio 直接编译进 x86/64
+  # 目标内核（built-in），无需 kmod 包；这里的开关用于 manifest 与
+  # 额外 kmod 选择（scripts/build.sh 消费）。
+  virtio:
+    enabled: true
+    net: true
+    block: true
+    scsi: true
+    balloon: true
+    rng: true
+    console: true
+    input: true
+    mmio: true
+
+  # VirtIO-FS —— 在 guest 内挂载 PVE 宿主机共享目录
+  # 上游 24.10 未提供该模块，本仓库自带 package/kernel/kmod-fs-virtiofs。
+  virtiofs:
+    enabled: true
+    fuse: true
+
+  # 9P 文件系统（备选的主机-客户机共享通道）
+  p9fs:
+    enabled: true
+
+  # 网络特性
+  network:
+    wireguard: true        # kmod-wireguard + wg + luci-app-wireguard
+    nftables: true         # nftables + kmod-nft-* （替代 iptables 后端）
+    iptables_nft: true     # iptables-over-nft 兼容层
+    bridge: true           # bridge-utils + kmod-bridge + kmod-veth + tun
+    veth: true
+    tun: true
+    multi_wan: false
+
+  # 旁路由 / 代理
+  proxy:
+    # nikki = mihomo (metacubexd/mihomo) 的 LuCI 封装命名习惯。
+    # mihomo 不在官方 24.10 feeds 中；需要先在 custom/feeds.conf 添加
+    # 提供 mihomo / luci-app-nikki 的 feed 后方可置为 true。
+    nikki: false
+    mihomo: false
+    smartdns: true
+    adguardhome: false
+
+  # 性能优化
+  performance:
+    bbr: true              # TCP_CONGESTION_BBR (kernel) + 默认队列 cake/fq_codel
+    cake: true             # kmod-sched-cake + sqm-scripts（可选）
+    fq_codel: true         # kmod-sched-fq-codel / 默认 qdisc
+    irqbalance: true       # irqbalance 守护进程（虚拟中断均衡）
+    sqm: false             # sqm-scripts + luci-app-sqm（体积较大，默认关）
+    tunning: true          # 900-pve-tuning.conf sysctl（BBR 默认拥塞控制等）
+
+  # LuCI 界面
+  luci:
+    enabled: true
+    theme: "bootstrap"     # 浅色主题：luci-theme-bootstrap（内置浅色）
+    # 可选: openwrt-24.10 可用主题: bootstrap / material / editor
+    language: "zh-cn"      # 默认语言：简体中文
+    translations: true     # luci-i18n-base-zh-cn 等全套中文翻译
+    statistics: true       # luci-app-statistics + collectd（含中文包）
+    firewall: true         # luci-app-firewall（nftables 后端）
+
+# ---------------------------------------------------------------------------
+# 构建选项
+# ---------------------------------------------------------------------------
+build:
+  # 固件版本前缀，影响镜像文件名与 /etc/openwrt_release
+  version_prefix: "PVE"
+  # 默认管理 IP（写入 custom/files/etc/config/network 的 lan 段）
+  lan_ip: "192.168.100.1"
+  lan_netmask: "255.255.255.0"
+  # 主机名
+  hostname: "immortalwrt-pve"
+  # 压缩格式
+  imagelets: ["gzip"]
+  # strip: 减小根文件系统体积
+  strip: true
+  # 并行任务数（本地构建用；CI 由 runner 决定）
+  jobs: 0                  # 0 = auto (nproc)

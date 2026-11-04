@@ -1,0 +1,22 @@
+#!/bin/sh
+# hotplug: 网卡上线后为 virtio-net 启用多队列（PVE 中给 VM 配多 vCPU/队列时生效）
+# 依赖 features.network.bridge / virtio.net
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "lan" ] || [ "$INTERFACE" = "wan" ] || exit 0
+
+dev="$1"
+# 找到底层物理口（bridge 场景取第一个 slave，直接口场景即自身）
+for port in $(ls /sys/class/net/"${dev}"/brif 2>/dev/null); do
+	phys="$port"
+done
+[ -n "${phys:-}" ] || phys="$dev"
+
+qmax=$(cat "/sys/class/net/${phys}/queues" 2>/dev/null | wc -w)
+[ "${qmax:-0}" -gt 1 ] || exit 0
+
+if command -v ethtool >/dev/null 2>&1; then
+	combined=$(( qmax < $(nproc) ? qmax : $(nproc) ))
+	ethtool -L "$phys" combined "$combined" 2>/dev/null
+fi
+exit 0
