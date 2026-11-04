@@ -109,14 +109,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Cache the npm cache directory itself (contents are content-addressed,
-      # so a fixed key is safe and saves the download on every run).
-      - name: Cache npm downloads
-        uses: actions/cache@v4
+      # Pin the Node runtime explicitly. Relying on whatever node happens to be
+      # first on the runner PATH is what made this job fragile: a different
+      # major version ships a different bundled npm, whose `npm ci` can refuse
+      # to install at all (leaving node_modules absent and making
+      # scripts/yq-compatible.mjs abort with 'the "yaml" package is not
+      # installed'). setup-node also gives us a lockfile-aware npm cache, so
+      # the manual "Cache npm downloads" step is no longer needed.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          path: ~/.npm
-          key: npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: npm-
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Read config.yml
         id: cfg
@@ -130,8 +135,17 @@ jobs:
           # JSON and fail silently - which previously produced empty build
           # configuration. Use the pinned Node parser instead (same one
           # scripts/build.sh uses), so there is exactly one YAML dialect.
+          #
+          # That parser needs the `yaml` dependency from package.json, so
+          # install it first and abort loudly if it did not land in
+          # node_modules/ - otherwise the failure would only show up as the
+          # confusing "yaml package is not installed" message below.
           node --version
           npm ci --no-audit --no-fund
+          test -d node_modules/yaml || {
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
+            exit 1
+          }
 
           # Prints nothing for absent keys (mikefarah-compatible subset).
           cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
@@ -206,14 +220,31 @@ jobs:
       - name: Checkout builder repository
         uses: actions/checkout@v4
 
-      # Share the npm cache with the prepare job so `npm ci` in scripts and
-      # any future node tooling never re-downloads packages.
-      - name: Cache npm downloads
-        uses: actions/cache@v4
+      # Node + the pinned `yaml` dependency are needed by scripts/utils.sh ->
+      # scripts/yq-compatible.mjs, which build.sh uses to read config.yml.
+      # Without this install (or with a mismatched lockfile) the parser aborts
+      # with 'the "yaml" package is not installed' and the .config generation
+      # silently loses every package entry. setup-node's built-in npm cache is
+      # shared with the prepare job (same lockfile key).
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          path: ~/.npm
-          key: npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: npm-
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install YAML parser dependencies
+        run: |
+          set -euo pipefail
+          node --version
+          npm ci --no-audit --no-fund
+          test -d node_modules/yaml || {
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
+            exit 1
+          }
+          # Fail here, not three hours into the build, if the parser is broken.
+          node scripts/yq-compatible.mjs '.target.board' config.yml
+          echo
 
       - name: Free disk space
         run: |

@@ -35,6 +35,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin Node and install the lockfile deps before the first parser call.
+      # scripts/yq-compatible.mjs hard-fails with 'the "yaml" package is not
+      # installed' when node_modules is missing (no checkout of a prior job's
+      # workspace here - every job starts on a fresh runner).
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Resolve upstream and compare
         id: check
         env:
@@ -49,6 +60,10 @@ jobs:
           # Use the pinned Node parser (scripts/yq-compatible.mjs) instead.
           node --version
           npm ci --no-audit --no-fund
+          test -d node_modules/yaml || {
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
+            exit 1
+          }
           cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
 
           REPO="$(cfg '.source.repo')"
@@ -133,6 +148,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fresh runner = no node_modules, so install the pinned `yaml` dep before
+      # calling scripts/yq-compatible.mjs (otherwise it exits 2 with
+      # 'the "yaml" package is not installed' and this step fails).
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       # GITHUB_TOKEN-created repository_dispatch events do NOT start workflows
       # (GitHub suppresses that to avoid recursion). workflow_dispatch via the
       # API does work with `actions: write`.
@@ -145,6 +170,10 @@ jobs:
           # checkout is needed for config.yml + the Node parser helper
           node --version
           npm ci --no-audit --no-fund
+          test -d node_modules/yaml || {
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
+            exit 1
+          }
           SOURCE_BRANCH="$(node scripts/yq-compatible.mjs '.source.branch' config.yml | tr -d '\r')"
           [ -n "$SOURCE_BRANCH" ] || SOURCE_BRANCH="openwrt-24.10"
           gh workflow run build.yml \
