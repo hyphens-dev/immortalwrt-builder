@@ -15,13 +15,15 @@ the patch or move it out of `custom/patches/`.
 Patches already applied are detected (`git apply --reverse --check`) and
 skipped, so re-running is safe.
 
-## `make olddefconfig failed - rerun with -j1 V=s to see the kconfig error`
+## `make olddefconfig failed ... - the kconfig error output is printed above`
 
-The config step now runs `make -j1 V=s defconfig` followed by
+The config step runs `make -j1 V=s defconfig` followed by
 `make -j1 V=s olddefconfig` (see `generate_config()` in `scripts/build.sh`).
 Serial verbose output means the real kconfig error is printed in the build log
 instead of being hidden behind parallel make output, and the failure message
-now includes the actual exit code.
+now includes the actual exit code. Since the script *already* passes `-j1 V=s`,
+the raw make/kconfig output of each pass is now echoed inline right before the
+`[ERROR]` line - scroll up in the CI log instead of rerunning the job.
 
 Two things used to break this step:
 
