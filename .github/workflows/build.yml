@@ -31,6 +31,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
+          # 最低要求 Node 18：scripts/yq-compatible.mjs 使用了 `node:` 前缀的
+          # 内置模块导入（Node >=14.18/16）与较新的 V8 特性，老镜像自带的
+          # Node 12/14 会直接报 "Cannot find module 'node:fs'" / SyntaxError。
+          # 统一用 setup-node 显式安装，避免依赖 runner 镜像里过旧的预装版本。
           node-version: '20'
       # 注意：runner 上有两个互不相关的 `yq`，本仓库一律使用
       # scripts/yq-compatible.mjs 解析 config.yml。
@@ -53,12 +57,46 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # 兼容非 ubuntu-24.04 的 runner（如误用旧镜像 / 自托管机器）：
+          # python3-distutils 在 Debian 12 / Ubuntu 23.04+（Python 3.12 移除了
+          # distutils）已被 obsoleted，apt 会报
+          #   "Package 'python3-distutils' has no installation candidate"
+          # 因此先探测候选版本是否存在，不存在则退回 python3-setuptools
+          # （ImmortalWrt/OpenWrt 官方构建依赖列表在新发行版上的等价替代）。
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang flex bison g++ gawk gcc gcc-multilib \
-            gettext git libncurses5-dev libssl-dev python3-distutils \
+          DEPS="build-essential clang flex bison g++ gawk gcc gcc-multilib \
+            gettext git libncurses5-dev libssl-dev \
             rsync swig unzip zlib1g-dev file wget ccache qemu-utils \
-            libelf-dev ack time
+            libelf-dev ack time"
+          if [ -n "$(apt-cache policy python3-distutils | awk '/Candidate:/ && $2 != "(none)" {print $2}')" ]; then
+            DEPS="$DEPS python3-distutils"
+          else
+            echo "python3-distutils 在当前发行版已不可用（Python>=3.12），改用 python3-setuptools"
+            DEPS="$DEPS python3-setuptools"
+          fi
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $DEPS
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # 同 config job：显式安装 Node 20，不依赖 runner 镜像自带的旧版本
+          node-version: '20'
+
+      - name: Check Node.js version
+        run: |
+          # scripts/yq-compatible.mjs 需要 Node >= 18（`node:` 前缀内置模块导入）。
+          # 若系统/runner 预装的 node 过老（常见于 Debian 11/Ubuntu 20.04 自带的
+          # Node 10/12，会报 Cannot find module 'node:fs'），显式报错并给出提示，
+          # 而不是在后面每个 `node scripts/...` 步骤里以难懂的堆栈失败。
+          MAJOR_RAW="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+          MAJOR="${MAJOR_RAW#v}"
+          case "$MAJOR" in ''|*[!0-9]*) MAJOR=0 ;; esac
+          if [ "${MAJOR}" -lt 18 ]; then
+            echo "::error::Node ${MAJOR} 过老，本仓库脚本需要 Node >= 18。请在 workflow 中加入 actions/setup-node@v4 (node-version: '20')，或在本地安装新版 Node（https://nodejs.org）。"
+            exit 1
+          fi
+          echo "Node $(node --version) OK"
 
       - name: Cache downloads + ccache
         uses: actions/cache@v4
