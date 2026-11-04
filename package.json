@@ -4,6 +4,9 @@
   "private": true,
   "description": "config.yml reader + unit tests for ImmortalWrt PVE/KVM builder",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "test": "node --test tests/"
   }
