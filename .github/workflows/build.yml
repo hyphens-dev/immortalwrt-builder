@@ -89,6 +89,18 @@ jobs:
           git -C openwrt rev-parse HEAD > upstream-built-marker
           cat upstream-built-marker
 
+      - name: Copy sha256sums to dist (参考 luyanci ci.yml L184-L199)
+        run: |
+          # 产物目录 bin/targets/<board>/<subtarget>/ 里有 sha256sums，
+          # 一并拷进 dist/ 供后续 Release 步骤引用。
+          TARGET_DIR="openwrt/bin/targets/$(node scripts/yq-compatible.mjs target.board)/$(node scripts/yq-compatible.mjs target.subtarget)"
+          if [ -f "${TARGET_DIR}/sha256sums" ]; then
+            cp "${TARGET_DIR}/sha256sums" dist/sha256sums
+          else
+            echo "::warning::未找到 ${TARGET_DIR}/sha256sums，Release 正文将缺少校验和"
+            : > dist/sha256sums
+          fi
+
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -97,17 +109,60 @@ jobs:
             dist/*.img.gz
             dist/*.manifest
             dist/config.buildinfo
+            dist/sha256sums
             dist/manifest.json
             upstream-built-marker
           if-no-files-found: error
 
-      - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  release:
+    needs: [config, build]
+    runs-on: ubuntu-24.04
+    # 参考 https://github.com/luyanci/immortalwrt-ax3000 ci.yml 的 release job：
+    # 从 artifacts 下载产物 -> 生成 Release.md（构建时间/Sources/SHA256）
+    # -> 用 softprops/action-gh-release 发布 prerelease。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware from artifacts
+        uses: actions/download-artifact@v4
         with:
-          tag_name: pve-build-${{ github.run_number }}
-          name: ImmortalWrt PVE build ${{ github.run_number }}
+          name: immortalwrt-pve-x86-64
+          path: dist
+
+      - name: Generate release informations
+        run: |
+          TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
+
+          TAG="pve-build-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S')-${GITHUB_SHA:0:8}"
+          echo "TAG=$TAG" >>"$GITHUB_ENV"
+
+          cat <<EOF | sed -E 's/^  //' >Release.md
+            ImmortalWrt PVE $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+
+            # ${{ needs.config.outputs.branch }}
+
+            Build time: \`$(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')\`
+            Release version: ${TAG}
+            Upstream commit: \`$(cat dist/upstream-built-marker 2>/dev/null || echo unknown)\`
+
+            ## SHA256
+            $(awk '{gsub(/^\*/,""); printf "%s: `%s`\n", $2, $1}' dist/sha256sums 2>/dev/null)
+          EOF
+
+          echo "NAME=$(head --line=1 Release.md)" >>"$GITHUB_ENV"
+          tail --line=+2 Release.md >Body.md
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.NAME }}
+          body_path: Body.md
           files: |
+            dist/sha256sums
             dist/*.img.gz
+            dist/*.manifest
             dist/manifest.json
-          make_prerelease: true
