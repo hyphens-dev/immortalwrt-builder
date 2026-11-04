@@ -52,6 +52,8 @@ jobs:
   build:
     needs: config
     runs-on: ubuntu-24.04
+    # 失败/噪音构建不再无限烧到 GitHub 的 6 小时硬限时；正常全量构建约 1.5-2.5h
+    timeout-minutes: 210
     steps:
       - uses: actions/checkout@v4
 

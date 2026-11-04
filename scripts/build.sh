@@ -79,12 +79,24 @@ main() {
   log_info "下载构建依赖源码 (make download, -j${jobs}) ..."
   make download -j"${jobs}" || { log_warn "部分源码下载失败，重试一轮 ..."; make download -j1; }
 
-  log_info "开始编译 (make -j${jobs}) ..."
-  make -j"${jobs}" -kB || { log_warn "并行编译失败，回退单线程定位错误"; make -j1 V=s; }
+  # NOTE: 不要使用 -k/-kB。-k（keep-going）会让某个包失败后继续调度其余所有
+  # 目标，在 CI 上表现为海量 "Failed to remake makefile 'Makefile'" 噪音，
+  # 并且失败的依赖会连锁拖垮后续阶段、白白耗尽 6 小时限时。
+  # NOTE: OpenWrt 的 make 命令行本身携带数千个 CONFIG_* 环境变量，
+  # 并行度过高时子进程 execve 会触发 "Argument list too long"（E2BIG），
+  # 因此对 jobs 设上限。
+  if (( jobs > 8 )); then
+    log_warn "并行度 ${jobs} 过高，限制为 8（避免 E2BIG: Argument list too long）"
+    jobs=8
+  fi
+
+  log_info "开始编译 (make -j${jobs}, W=0) ..."
+  make -j"${jobs}" W=0 || { log_warn "并行编译失败，回退单线程定位错误"; make -j1 W=0 V=s; }
 
   log_info "安装打包根目录并生成镜像 ..."
   make install
-  make image -j"${jobs}"
+  # 镜像阶段并行度降低：rootfs 组装会 fork 大量 cp/rsync，argv+env 超限即 E2BIG
+  make image -j"$( (( jobs > 4 )) && echo 4 || echo "${jobs}" )"
   cfg_bool features.luci.enabled && make package/luci/compile || true
 
   # ------------------------------------------------------------ 6. dist
