@@ -302,9 +302,43 @@ EOF
     trap 'rm -f "${before:-}" "${after:-}"' RETURN
     grep -E '^CONFIG_[A-Za-z0-9_]+=(y|m)=?$' "${target_config}" 2>/dev/null | sort > "${before}" || true
 
-    if ! make olddefconfig < /dev/null; then
-        popd > /dev/null
-        die "make olddefconfig failed - rerun with -j1 V=s to see the kconfig error"
+    # `make olddefconfig` alone is NOT enough here: .config was assembled by
+    # concatenating config/*.config + feature toggles, so it contains only a
+    # few hundred symbols and no CONFIG_TARGET_...=y subtarget/device block.
+    # Without a prior `make defconfig` pass, kconfig's olddefconfig cannot
+    # bootstrap the target selection (and on some trees dies inside
+    # scripts/config/conf), which is exactly the failure this step hit in CI.
+    #
+    # Run defconfig first (fills in every default and resolves the target),
+    # then olddefconfig to keep the explicitly requested selections. Both are
+    # executed serially with V=s so that any kconfig error text lands in the
+    # build log instead of being swallowed by parallel make output.
+    local cfg_make_flags="-j1 V=s"
+    if [[ "${BUILD_VERBOSE:-false}" == "true" ]]; then
+        cfg_make_flags="V=sc"
+    fi
+
+    # Capture the real exit status of each kconfig pass: inside
+    # `if ! cmd; then rc=$?` bash reports 1 for *any* non-zero status, which
+    # would hide the actual kconfig/make error code in the log.
+    local cfg_rc=0
+
+    make ${cfg_make_flags} defconfig < /dev/null || cfg_rc=$?
+    if (( cfg_rc != 0 )); then
+        log_warn "make defconfig failed (exit ${cfg_rc}) - retrying with make olddefconfig"
+        local old_rc=0
+        make ${cfg_make_flags} olddefconfig < /dev/null || old_rc=$?
+        if (( old_rc != 0 )); then
+            popd > /dev/null
+            die "make olddefconfig failed (exit ${old_rc}, after defconfig exit ${cfg_rc}) - rerun with -j1 V=s to see the kconfig error"
+        fi
+    else
+        local old_rc=0
+        make ${cfg_make_flags} olddefconfig < /dev/null || old_rc=$?
+        if (( old_rc != 0 )); then
+            popd > /dev/null
+            die "make olddefconfig failed (exit ${old_rc}) - rerun with -j1 V=s to see the kconfig error"
+        fi
     fi
 
     grep -E '^CONFIG_[A-Za-z0-9_]+=(y|m)=?$' "${target_config}" 2>/dev/null | sort > "${after}" || true
@@ -313,7 +347,7 @@ EOF
     if [[ -n "${drift}" ]]; then
         local dropped_count
         dropped_count="$(printf '%s\n' "${drift}" | grep -c '^CONFIG_' || true)"
-        log_warn "make olddefconfig dropped ${dropped_count} selected symbol(s):"
+        log_warn "kconfig dropped ${dropped_count} selected symbol(s):"
         printf '%s\n' "${drift}" | head -40 | while IFS= read -r sym; do
             log_warn "  - ${sym}"
         done

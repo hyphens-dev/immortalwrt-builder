@@ -78,8 +78,10 @@ Runner 镜像自带两个互不相关的名为 `yq` 的工具，因此**任何�
 3. `config/packages.config` — `CONFIG_PACKAGE_*` 选择项
 4. 来自 `config.yml` 的功能开关
 5. `packages.include` / `packages.exclude`
-6. `make olddefconfig`（在安装 feeds 之后执行）— kconfig 无法解析的符号会以
-   *config drift*（配置漂移）形式报告，而不是被静默丢弃；设置
+6. `make defconfig` + `make olddefconfig`（在安装 feeds 之后、以 `-j1 V=s`
+   串行执行，确保 kconfig 报错能出现在日志里）。先 `defconfig` 引导出完整的
+   目标/默认配置，再 `olddefconfig` 保留显式选择的符号。kconfig 无法解析的
+   符号会以 *config drift*（配置漂移）形式报告，而不是被静默丢弃；设置
    `BUILD_STRICT_CONFIG=true` 可在出现任何漂移时让构建失败
 
 ## 项目结构

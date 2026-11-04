@@ -15,6 +15,34 @@ the patch or move it out of `custom/patches/`.
 Patches already applied are detected (`git apply --reverse --check`) and
 skipped, so re-running is safe.
 
+## `make olddefconfig failed - rerun with -j1 V=s to see the kconfig error`
+
+The config step now runs `make -j1 V=s defconfig` followed by
+`make -j1 V=s olddefconfig` (see `generate_config()` in `scripts/build.sh`).
+Serial verbose output means the real kconfig error is printed in the build log
+instead of being hidden behind parallel make output, and the failure message
+now includes the actual exit code.
+
+Two things used to break this step:
+
+1. `.config` was assembled by concatenating `config/*.config` + feature
+   toggles, i.e. it had no complete target/subtarget block. Running only
+   `olddefconfig` on such a file can fail inside `scripts/config/conf`;
+   `defconfig` first bootstraps the full default configuration.
+2. Garbage lines written from an empty/whitespace-only `packages.exclude`
+   value (wrong `yq` flavour) - see the comment above that loop; the parser
+   is now pinned to `scripts/yq-compatible.mjs`.
+
+If the step still fails, re-run locally with:
+
+```bash
+cd openwrt && make -j1 V=s defconfig
+```
+
+and fix the symbol kconfig reports. Unresolved-but-selected symbols are
+reported as *config drift* afterwards; set `BUILD_STRICT_CONFIG=true` to turn
+that into a hard failure.
+
 ## `CONFIG_PACKAGE_...` warnings during `make defconfig`
 
 A package symbol that does not exist in any enabled feed is dropped. Verify the
