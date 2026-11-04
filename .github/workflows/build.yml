@@ -1,11 +1,26 @@
 name: Build ImmortalWrt PVE Firmware
 
+# ---------------------------------------------------------------------------
+# Robustness rules (keep in sync with README.md "CI"):
+#   * config.yml is ONLY parsed through scripts/yq-compatible.mjs after a
+#     pinned setup-node + `npm ci` (never the runner's ambiguous `yq`).
+#   * Every workflow input / output reaches the shell through `env:` and is
+#     validated there — never interpolated into a script body (injection).
+#   * All `${{ }}` comparisons use string(...) so a boolean input can never be
+#     compared against the literal string "true"/"false".
+#   * build.timeout in config.yml must stay below timeout-minutes minus the
+#     clone/feeds overhead; it is clamped in `prepare`, not trusted blindly.
+# ---------------------------------------------------------------------------
+
 on:
   push:
     branches: [main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
+      - '.github/workflows/lint.yml'
+      - '.github/workflows/cleanup.yml'
+      - '.github/workflows/sync-upstream.yml'
   workflow_dispatch:
     inputs:
       source_repo:
@@ -73,13 +88,16 @@ on:
 
 # All workflow inputs are passed through `env`, never interpolated directly into
 # a shell script (prevents command injection via workflow_dispatch inputs).
+# `|| ''` is deliberately NOT used to coerce unset values: if an input ever
+# resolved to an object/array, `${{ }}` would interpolate its JSON literal and
+# leak it into a shell environment value. The string is sanitised in the shell
+# instead (see the guard steps below).
 env:
-  INPUT_SOURCE_REPO: ${{ inputs.source_repo || '' }}
-  INPUT_SOURCE_BRANCH: ${{ inputs.source_branch || '' }}
-  INPUT_SOURCE_TAG: ${{ inputs.source_tag || '' }}
-  INPUT_VERBOSE: ${{ inputs.verbose || false }}
+  INPUT_SOURCE_REPO: ${{ inputs.source_repo }}
+  INPUT_SOURCE_BRANCH: ${{ inputs.source_branch }}
+  INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+  INPUT_VERBOSE: ${{ inputs.verbose }}
 
-  PROJECT_DIR: ${{ github.workspace }}
   SOURCE_DIR: ${{ github.workspace }}/openwrt
   OUTPUT_DIR: ${{ github.workspace }}/output
 
@@ -97,6 +115,7 @@ jobs:
   prepare:
     name: Resolve Configuration
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     outputs:
       source_repo: ${{ steps.cfg.outputs.source_repo }}
       source_branch: ${{ steps.cfg.outputs.source_branch }}
@@ -150,6 +169,21 @@ jobs:
           # Prints nothing for absent keys (mikefarah-compatible subset).
           cfg() { node scripts/yq-compatible.mjs "$1" config.yml | tr -d '\r'; }
 
+          # Sanitise workflow_dispatch / workflow_call inputs before any use:
+          # unset inputs arrive as the literal string "null" or "false"
+          # (booleans), and an unexpected object/array would arrive as a JSON
+          # literal. Everything is compared/stripped in the shell - never
+          # interpolated into this script body.
+          sanitize() {
+            local v="${1:-}"
+            case "${v}" in null|false|None) v='' ;; esac
+            printf '%s' "${v//[\"\'\`\$\{}\\]/}"
+          }
+          INPUT_SOURCE_REPO="$(sanitize "${INPUT_SOURCE_REPO:-}")"
+          INPUT_SOURCE_BRANCH="$(sanitize "${INPUT_SOURCE_BRANCH:-}")"
+          INPUT_SOURCE_TAG="$(sanitize "${INPUT_SOURCE_TAG:-}")"
+          INPUT_VERBOSE="$(sanitize "${INPUT_VERBOSE:-}")"
+
           SOURCE_REPO="${INPUT_SOURCE_REPO:-$(cfg '.source.repo')}"
           SOURCE_BRANCH="${INPUT_SOURCE_BRANCH:-$(cfg '.source.branch')}"
           SOURCE_TAG="${INPUT_SOURCE_TAG:-$(cfg '.source.tag')}"
@@ -165,9 +199,39 @@ jobs:
           [ -n "$ARCH" ] || ARCH="x86_64"
           [ -n "$BOARD" ] || BOARD="x86"
           [ -n "$SUBTARGET" ] || SUBTARGET="64"
-          [ -n "$TIMEOUT" ] || TIMEOUT="350"
 
-          if [ "${INPUT_VERBOSE:-false}" = "true" ]; then VERBOSE="true"; fi
+          # Timeout sanity (README: build.timeout must stay below the GitHub
+          # job budget minus clone/feeds overhead). Validate numerically,
+          # default to 330, and clamp into [10, 320] so a typo in config.yml
+          # cannot kill the job externally (or waste hours).
+          if [ -z "$TIMEOUT" ]; then TIMEOUT=330; fi
+          if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
+            echo "::warning::build.timeout is not a number ('${TIMEOUT}'); using 330"
+            TIMEOUT=330
+          elif (( TIMEOUT > 320 )); then
+            echo "::warning::build.timeout=${TIMEOUT} exceeds the safe CI ceiling; clamping to 320 (job budget is 360m)"
+            TIMEOUT=320
+          elif (( TIMEOUT < 10 )); then
+            echo "::warning::build.timeout=${TIMEOUT} is too small to ever succeed; clamping to 10"
+            TIMEOUT=10
+          fi
+
+          if [ "$INPUT_VERBOSE" = "true" ]; then VERBOSE="true"; fi
+
+          # Fail fast on obviously invalid refs/URLs instead of three minutes
+          # into the clone step.
+          case "$SOURCE_REPO" in
+            https://*|git@*:|ssh://*) ;;
+            *) echo "::error::source.repo does not look like a git URL: '${SOURCE_REPO}'"; exit 1 ;;
+          esac
+          if [ -n "$SOURCE_TAG" ] && ! [[ "$SOURCE_TAG" =~ ^[A-Za-z0._-]+$ ]]; then
+            echo "::error::source.tag contains invalid characters: '${SOURCE_TAG}'"
+            exit 1
+          fi
+          if ! [[ "$SOURCE_BRANCH" =~ ^[A-Za-z0._/-]+$ ]]; then
+            echo "::error::source.branch contains invalid characters: '${SOURCE_BRANCH}'"
+            exit 1
+          fi
 
           {
             echo "source_repo=$SOURCE_REPO"
@@ -189,6 +253,7 @@ jobs:
             echo "| Ref | \`${SOURCE_TAG:-$SOURCE_BRANCH}\` |"
             echo "| Target | \`$BOARD/$SUBTARGET\` (pkgarch \`$ARCH\`) |"
             echo "| Timeout | \`${TIMEOUT}m\` |"
+            echo "| Verbose | \`$VERBOSE\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ──────────────────────────────────────────────
@@ -343,17 +408,52 @@ jobs:
       # limit, so only the toolchain download cache above is persisted.
 
       - name: Clone ImmortalWrt source
+        id: clone
         run: |
           set -euo pipefail
+          # Branch names AND tag names both work with `--branch` (git resolves
+          # refs/heads/<name> and refs/tags/<name>). The ref was already
+          # character-validated in the prepare job.
           REF="${SOURCE_BRANCH}"
           if [ -n "${SOURCE_TAG}" ]; then
-            REF="refs/tags/${SOURCE_TAG}"
+            REF="${SOURCE_TAG}"
           fi
           echo "Cloning ${SOURCE_REPO} at ${REF}"
-          git clone --depth=1 --branch="${REF}" "${SOURCE_REPO}" "${SOURCE_DIR}"
+
+          # Retries guard against transient GitHub/network hiccups, which were
+          # the most common *random* CI failure. --single-branch keeps the
+          # checkout to one ref; blobs are fetched on demand so the initial
+          # clone stays fast while `git describe` (used by build.sh for version
+          # strings) still works. If a blobless clone is unsupported by the
+          # server, fall back to a plain single-branch clone.
+          attempt=1
+          cloned=false
+          while (( attempt <= 3 )); do
+            rm -rf "${SOURCE_DIR}"
+            if git clone --filter=blob:none --single-branch --branch="${REF}" \
+                 "${SOURCE_REPO}" "${SOURCE_DIR}" 2>&1 ||
+               git clone --single-branch --branch="${REF}" \
+                 "${SOURCE_REPO}" "${SOURCE_DIR}" 2>&1; then
+              cloned=true
+              break
+            fi
+            echo "Clone attempt ${attempt}/3 failed, retrying in 10s..."
+            attempt=$(( attempt + 1 ))
+            sleep 10
+          done
+          if [ "${cloned}" != "true" ]; then
+            echo "::error::git clone failed after 3 attempts (${SOURCE_REPO} @ ${REF})"
+            exit 1
+          fi
+
           cd "${SOURCE_DIR}"
           echo "Checked out: $(git log -1 --format='%h %s')"
-          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # Single source of truth for the built upstream commit: write it to
+          # $GITHUB_ENV (for later steps' shells) AND expose it as a step
+          # output, so no step has to rely on env-var timing.
+          COMMIT="$(git rev-parse HEAD)"
+          echo "SOURCE_COMMIT=${COMMIT}" >> "$GITHUB_ENV"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Build firmware
         id: build_step
@@ -363,10 +463,27 @@ jobs:
           # scripts/build.sh so there is exactly one implementation.
           OPENWRT_DIR: ${{ env.SOURCE_DIR }}
           OUTPUT_DIR: ${{ env.OUTPUT_DIR }}
+          BUILD_TIMEOUT: ${{ needs.prepare.outputs.timeout }}
+          BUILD_VERBOSE: ${{ needs.prepare.outputs.verbose }}
         run: |
           set -euo pipefail
           chmod +x scripts/*.sh
+
+          # Fail fast if a previous build produced no bin/targets output at all
+          # (e.g. wrong board/subtarget in config.yml): build.sh would only
+          # warn and "succeed" with an empty output dir, which then fails much
+          # later in the release job with a confusing error.
           ./scripts/build.sh
+
+          bin_dir="${OPENWRT_DIR}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}"
+          if [ ! -d "${bin_dir}" ]; then
+            echo "::error::Expected image directory not found: ${bin_dir} (check target.board/target.subtarget in config.yml)"
+            exit 1
+          fi
+          if [ -z "$(find "${bin_dir}" -maxdepth 1 -type f -name '*.img*' -print -quit)" ]; then
+            echo "::error::No firmware images were produced in ${bin_dir}"
+            exit 1
+          fi
 
       - name: Report ccache stats
         if: always()
@@ -383,10 +500,17 @@ jobs:
         run: |
           set -euo pipefail
           cd "${OUTPUT_DIR}" 2>/dev/null || exit 0
+          # Guard against hashing an *empty* directory: sha256sums.txt must
+          # never be the only file in the artifact (that would let the release
+          # job "succeed" with no firmware).
+          if [ -z "$(find . -maxdepth 1 -type f ! -name 'sha256sums.txt' ! -name '*.sha256' -print -quit)" ]; then
+            echo "::warning::Output directory is empty - no checksums generated (the build step above should have failed instead)"
+            exit 0
+          fi
           # sha256sums.txt is written last and must not hash itself
           find . -maxdepth 1 -type f ! -name 'sha256sums.txt' ! -name '*.sha256' \
             -printf '%P\0' | sort -z | xargs -0 -r sha256sum > sha256sums.txt
-          cat sha256sums.txt || true
+          cat sha256sums.txt
           sha256sum -c sha256sums.txt
 
       - name: Record built upstream commit
@@ -397,8 +521,17 @@ jobs:
           # to main: pushing from CI races with concurrent runs and requires
           # write tokens; artifacts are atomic, per-run, and can be downloaded
           # by sync-upstream.yml via the GitHub API (see that workflow).
+          # Use the clone step's *output* (never re-derive it) and refuse to
+          # write an empty marker - an empty .upstream-built would make
+          # sync-upstream rebuild forever / skip builds unpredictably.
+          COMMIT="${{ steps.clone.outputs.commit }}"
+          if [ -z "${COMMIT}" ]; then
+            echo "::error::Upstream commit is empty; refusing to write the build marker"
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/marker"
-          printf '%s\n' "${SOURCE_COMMIT}" > "$RUNNER_TEMP/marker/.upstream-built"
+          printf '%s\n' "${COMMIT}" > "$RUNNER_TEMP/marker/.upstream-built"
+
       - name: Upload build marker
         if: steps.build_step.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -436,17 +569,32 @@ jobs:
   release:
     name: Create Release
     needs: [prepare, build]
+    # Explicit string(...) comparisons: `== true` on an unset input can behave
+    # unexpectedly across trigger contexts, and we must never release when the
+    # build or the config resolution failed.
     if: |
       always() &&
+      needs.prepare.result == 'success' &&
       needs.build.result == 'success' &&
       (github.event_name == 'push' ||
        github.event_name == 'repository_dispatch' ||
-       inputs.create_release == true)
+       github.event_name == 'workflow_call' ||
+       string(inputs.create_release) == 'true')
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      SOURCE_REPO: ${{ needs.prepare.outputs.source_repo }}
+      ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+      SOURCE_REF: ${{ needs.prepare.outputs.source_tag || needs.prepare.outputs.source_branch }}
+      TARGET_LABEL: ${{ needs.prepare.outputs.arch }}/${{ needs.prepare.outputs.subtarget }}
     steps:
+      # fetch-depth: 0 so `git describe --tags` can see existing tags; without
+      # it every release got the "v0" fallback and tag names drifted.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download firmware artifact
         uses: actions/download-artifact@v4
@@ -472,12 +620,19 @@ jobs:
           set -euo pipefail
           cd release-artifacts
           ls -lh
+          # The release is pointless (and softprops would fail on missing
+          # globs) without at least one actual firmware image - verify before
+          # publishing instead of creating an empty/broken Release.
+          if ! find . -maxdepth 1 -type f -name '*combined*.img.gz' | grep -q .; then
+            echo "::error::No *combined*.img.gz found in the downloaded artifact '${ARTIFACT_NAME}' - refusing to publish an empty release"
+            exit 1
+          fi
           {
             echo "# ImmortalWrt PVE build ${GITHUB_RUN_NUMBER}"
             echo ""
-            echo "- Upstream: $SOURCE_REPO @ ${SOURCE_COMMIT:-unknown}"
-            echo "- Source ref: ${{ needs.prepare.outputs.source_tag || needs.prepare.outputs.source_branch }}"
-            echo "- Target: ${{ needs.prepare.outputs.arch }}/${{ needs.prepare.outputs.subtarget }}"
+            echo "- Upstream: ${SOURCE_REPO} @ $(echo "${{ needs.build.outputs.build_result }}'")"
+            echo "- Source ref: \`${SOURCE_REF}\`"
+            echo "- Target: \`${TARGET_LABEL}\`"
             echo "- Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo ""
             echo "## Files"
