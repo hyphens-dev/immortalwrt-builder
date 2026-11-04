@@ -47,7 +47,7 @@ jobs:
           # no grep/awk line parsing that breaks on comments or quoting).
           npm ci --no-audit --no-fund
           test -d node_modules/yaml || {
-            echo '::error::npm ci did not install node_modules/yaml (lockfile out of sync? run `npm install` and commit package-lock.json)'
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
             exit 1
           }
           KEEP_RELEASES="$(node scripts/yq-compatible.mjs '.release.keep_releases' config.yml | tr -d '\r')"

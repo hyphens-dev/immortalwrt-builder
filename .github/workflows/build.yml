@@ -143,7 +143,7 @@ jobs:
           node --version
           npm ci --no-audit --no-fund
           test -d node_modules/yaml || {
-            echo '::error::npm ci did not install node_modules/yaml (lockfile out of sync? run `npm install` and commit package-lock.json)'
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
             exit 1
           }
 
@@ -239,7 +239,7 @@ jobs:
           node --version
           npm ci --no-audit --no-fund
           test -d node_modules/yaml || {
-            echo '::error::npm ci did not install node_modules/yaml (lockfile out of sync? run `npm install` and commit package-lock.json)'
+            echo "::error::npm ci did not install node_modules/yaml (lockfile out of sync? run \`npm install\` and commit package-lock.json)"
             exit 1
           }
           # Fail here, not three hours into the build, if the parser is broken.
