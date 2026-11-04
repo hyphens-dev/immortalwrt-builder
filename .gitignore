@@ -1,0 +1,23 @@
+# OpenWrt / ImmortalWrt 构建产物与本地工作目录
+/openwrt/
+/dist/
+/bin/
+/build_dir/
+/staging_dir/
+/toolchain*/
+/tmp/
+/.config
+/.config.old
+/dl/
+/.ccache/
+/.upstream-built
+feeds.conf.default
+
+# Node
+node_modules/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store

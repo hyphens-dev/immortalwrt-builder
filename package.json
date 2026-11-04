@@ -1,0 +1,10 @@
+{
+  "name": "immortalwrt-pve-builder",
+  "version": "2.0.0",
+  "private": true,
+  "description": "config.yml reader + unit tests for ImmortalWrt PVE/KVM builder",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}

@@ -1,0 +1,8 @@
+# uhttpd — LuCI Web 管理界面（overlay 默认值）
+# 监听所有接口 80/443；开启 IPv6。
+
+*uhttpd.uhttpd.listen_http='0.0.0.0:80'
+*uhttpd.uhttpd.listen_https='0.0.0.0:443 [::]:443'
+*uhttpd.uhttpd.cert_file='/etc/uhttpd.crt'
+*uhttpd.uhttpd.key_file='/etc/uhttpd.key'
+# 会话语言跟随浏览器，未命中时由 default-settings-chn / luci-i18n-zh-cn 提供中文

@@ -1,0 +1,18 @@
+#!/bin/sh
+# rc.local — PVE guest 启动收尾：BBR 兜底 + irqbalance + virtiofs 挂载点
+# 保持幂等；真正的默认值来自 /etc/sysctl.d/900-pve-tuning.conf
+
+# BBR 模块可能未自动加载（kmod 以 .ko 安装时）
+insmod tcp_bbr 2>/dev/null
+insmod tcp_htcp 2>/dev/null
+
+# 确认 sysctl 已应用（procd 的 sysctl 触发在部分镜像里滞后）
+sysctl -p /etc/sysctl.d/900-pve-tuning.conf >/dev/null 2>&1
+
+# irqbalance 开机自启（构建期已 enable，这里兜底）
+service irqbalance enabled 2>/dev/null || { service irqbalance start 2>/dev/null; }
+
+# virtiofs 常用挂载点目录（宿主机通过 vhost-user-fs 共享时手动 mount -t virtiofs tag /mnt/virtiofs）
+mkdir -p /mnt/virtiofs /mnt/9p
+
+exit 0

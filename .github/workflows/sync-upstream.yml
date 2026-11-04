@@ -1,0 +1,45 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 每日 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Detect new upstream commits
+        id: sync
+        run: |
+          if NEW_COMMIT="$(bash scripts/sync.sh)"; then
+            echo "update=true" >> "$GITHUB_OUTPUT"
+            echo "commit=${NEW_COMMIT}" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            if [ "${rc}" = "10" ]; then
+              echo "无更新，跳过"
+            else
+              exit "${rc}"
+            fi
+          fi
+      # 本工作流刻意不把仓库 rebase 到 ImmortalWrt 之上（两仓库没有共同
+      # 历史、源码树数 GB）。仅通过 repository_dispatch 触发 build.yml；
+      # 成功构建的上游 commit 以 `upstream-built-marker` 构件发布，
+      # 绝不直接推送到 main（避免与并发构建竞争）。
+      - name: Trigger build
+        if: steps.sync.outputs.update == 'true'
+        run: |
+          curl -sf -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.REPO_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+            -d '{"event_type":"upstream-update","client_payload":{"commit":"${{ steps.sync.outputs.commit }}"}}'
