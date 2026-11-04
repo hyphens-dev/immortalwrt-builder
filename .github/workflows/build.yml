@@ -57,6 +57,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # runner 根分区只有 ~14GB，OpenWrt 全量构建的 staging_dir/build_dir 会
+      # 吃掉绝大部分空间。先删掉构建用不到的预装工具链（Android SDK、.NET、
+      # PowerShell、hostedtoolcache/Ruby 等），通常可释放 5-8GB。
+      # 必须放在 setup-node / apt install 之前：setup-node 会把 Node 写进
+      # hostedtoolcache，先清理就不会误删本次要用的版本。
+      - name: Free up disk space (remove unused toolchains)
+        run: bash scripts/clean-runner.sh
+
+      - name: Disk usage report
+        run: df -h /
+
       - name: Install build dependencies
         run: |
           # 兼容非 ubuntu-24.04 的 runner（如误用旧镜像 / 自托管机器）：
