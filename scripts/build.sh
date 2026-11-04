@@ -318,26 +318,51 @@ EOF
         cfg_make_flags="V=sc"
     fi
 
-    # Capture the real exit status of each kconfig pass: inside
-    # `if ! cmd; then rc=$?` bash reports 1 for *any* non-zero status, which
-    # would hide the actual kconfig/make error code in the log.
-    local cfg_rc=0
+    # The kconfig passes are already run serially and verbosely (-j1 V=s), but
+    # CI only surfaces our final [ERROR] line unless the raw make output is
+    # also echoed inline. Capture each pass into a log file, print it verbatim
+    # on failure (and in debug mode on success), so the *actual* kconfig error
+    # appears in the build log without needing another rerun.
+    local cfg_rc=0 old_rc=0
 
-    make ${cfg_make_flags} defconfig < /dev/null || cfg_rc=$?
+    # Run one kconfig goal serially/verbosely, capturing its output so the raw
+    # make/kconfig error can be dumped straight into the build log on failure
+    # (instead of telling the user to rerun with -j1 V=s, which we already do).
+    # The exit status is propagated via `|| rc=$?` at the call sites: inside an
+    # `if ! cmd; ... fi` block bash leaves $? holding the *if* construct's own
+    # status, which hides the real kconfig/make error code.
+    run_kconfig_pass() {
+        local goal="$1"
+        local log rc=0
+        log="$(mktemp)"
+        # shellcheck disable=SC2086  # cfg_make_flags is intentionally word-split
+        make ${cfg_make_flags} "${goal}" < /dev/null >"${log}" 2>&1 || rc=$?
+        if (( rc != 0 )); then
+            log_warn "make ${goal} output (exit ${rc}):"
+            sed "s/^/[${goal}] /" "${log}" >&2
+        elif [[ "${VERBOSE:-false}" == "true" ]]; then
+            sed "s/^/[${goal}] /" "${log}" >&2
+        fi
+        rm -f "${log}"
+        return "${rc}"
+    }
+
+    run_kconfig_pass defconfig || cfg_rc=$?
     if (( cfg_rc != 0 )); then
         log_warn "make defconfig failed (exit ${cfg_rc}) - retrying with make olddefconfig"
-        local old_rc=0
-        make ${cfg_make_flags} olddefconfig < /dev/null || old_rc=$?
+        # NOTE: after `if ! cmd; ... fi`, $? holds the status of the *if*
+        # construct (0 when the branch is skipped), not the function's exit
+        # code - use the `|| rc=$?` form to capture the real kconfig status.
+        run_kconfig_pass olddefconfig || old_rc=$?
         if (( old_rc != 0 )); then
             popd > /dev/null
-            die "make olddefconfig failed (exit ${old_rc}, after defconfig exit ${cfg_rc}) - rerun with -j1 V=s to see the kconfig error"
+            die "make olddefconfig failed (exit ${old_rc}, after defconfig exit ${cfg_rc}) - the kconfig error output is printed above (already ran with -j1 V=s)"
         fi
     else
-        local old_rc=0
-        make ${cfg_make_flags} olddefconfig < /dev/null || old_rc=$?
+        run_kconfig_pass olddefconfig || old_rc=$?
         if (( old_rc != 0 )); then
             popd > /dev/null
-            die "make olddefconfig failed (exit ${old_rc}) - rerun with -j1 V=s to see the kconfig error"
+            die "make olddefconfig failed (exit ${old_rc}) - the kconfig error output is printed above (already ran with -j1 V=s)"
         fi
     fi
 
