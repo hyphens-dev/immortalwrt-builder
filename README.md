@@ -10,7 +10,7 @@
 | 类别 | 内容 | 实现方式 |
 |------|------|----------|
 | VirtIO | virtio-net/-blk/-scsi/-balloon/-rng/-console/-mmio | 已 built-in 于 x86/64 目标内核；额外安装 kmod-virtio-console/balloon/rng |
-| **VirtIO-FS** | 挂载 PVE 宿主机共享目录 | 本仓库自带 `package/kernel/kmod-fs-virtiofs`（上游 24.10 无此包）+ fuse-utils，详见 [docs/virtiofs.md](docs/virtiofs.md) |
+| **VirtIO-FS** | 挂载 PVE 宿主机共享目录 | 本仓库自带 `package/kernel/linux/modules/fs-virtiofs.mk`（上游 24.10 无此包）+ fuse-utils，详见 [docs/virtiofs.md](docs/virtiofs.md) |
 | 9P | 备选主机共享通道 | kmod-fs-9p + kmod-virtio-9p |
 | 网络 | WireGuard、nftables、iptables-nft、bridge/veth/tun | kmod + tools + LuCI app，详见 [docs/networking.md](docs/networking.md) |
 | 代理 | **nikki (mihomo)**、SmartDNS | nikki 需先在 `custom/feeds.conf` 启用 feed（官方 24.10 feeds 不含 mihomo），详见 [docs/nikki.md](docs/nikki.md) |
@@ -45,7 +45,8 @@ qm importdisk <VMID> immortalwrt-*.img local-lvm
 │   ├── sync.sh                   # 上游提交检测（--record 记录已构建 commit）
 │   ├── utils.sh                  # cfg/cfg_bool/validate_config 公共库
 │   └── yq-compatible.mjs         # 确定性 YAML 读取器（替代裸 yq）
-├── package/kernel/kmod-fs-virtiofs/   # 自研 virtiofs kmod 包
+├── package/kernel/linux/modules/
+│   └── fs-virtiofs.mk        # 自研 virtiofs kmod（上游 24.10 缺失）
 ├── custom/
 │   ├── feeds.conf                # feeds（含 nikki 预留位）
 │   └── files/                    # rootfs overlay

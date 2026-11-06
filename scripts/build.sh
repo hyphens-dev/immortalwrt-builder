@@ -5,7 +5,7 @@
 #   1. 校验 config.yml（scripts/utils.sh + yq-compatible.mjs）
 #   2. 克隆/更新 ImmortalWrt 源码（浅克隆，可 pin tag）
 #   3. 安装 feeds（官方 feeds + custom/feeds.conf 附加 feed）
-#   4. 注入本仓库的自定义包（kmod-fs-virtiofs）与 files/ overlay
+#   4. 注入本仓库的自定义内核模块（fs-virtiofs.mk）与 files/ overlay
 #   5. 依据 config.yml 生成 .config（内核选项 + 包选择）
 #   6. make download / make -j / make install / make image
 #   7. 输出 manifest.json 供 CI 归档
@@ -59,8 +59,11 @@ main() {
 
   # -------------------------------------------------- 3. 自定义包 & overlay
   log_info "注入自定义包与文件 overlay ..."
-  mkdir -p package/kernel
-  cp -r "${REPO_ROOT}/package/kernel/kmod-fs-virtiofs" package/kernel/
+  # 内核模块包必须放到 package/kernel/linux/modules/（OpenWrt 的
+  # SCAN_DEPS=modules/*.mk 就是相对这个目录扫描的）。放到 package/kernel/
+  # 下不会被扫描到，包静默不存在，.config 里的 CONFIG_PACKAGE_* 会被丢弃。
+  mkdir -p package/kernel/linux/modules
+  cp -f "${REPO_ROOT}"/package/kernel/linux/modules/*.mk         package/kernel/linux/modules/ 2>/dev/null || true
   # files overlay（sysctl、network、hotplug 等直接进 rootfs）
   rm -rf files
   cp -r "${REPO_ROOT}/custom/files" files
@@ -82,6 +85,14 @@ main() {
   # NOTE: 不要使用 -k/-kB。-k（keep-going）会让某个包失败后继续调度其余所有
   # 目标，在 CI 上表现为海量 "Failed to remake makefile 'Makefile'" 噪音，
   # 并且失败的依赖会连锁拖垮后续阶段、白白耗尽 6 小时限时。
+  # ccache 目录对齐：.config 里 CONFIG_CCACHE_DIR 留空时 OpenWrt 用
+  # ~/.ccache，而 CI 缓存的是 ~/openwrt/.ccache，必须显式设置
+  # CCACHE_DIR，否则缓存目录对不上、每次全量重编。
+  if [[ -d "${SRC_DIR}/.ccache" ]]; then
+    export CCACHE_DIR="${SRC_DIR}/.ccache"
+    log_info "使用 ccache 目录: ${CCACHE_DIR}"
+  fi
+
   # NOTE: OpenWrt 的 make 命令行本身携带数千个 CONFIG_* 环境变量，
   # 并行度过高时子进程 execve 会触发 "Argument list too long"（E2BIG），
   # 因此对 jobs 设上限。
@@ -90,8 +101,10 @@ main() {
     jobs=8
   fi
 
-  log_info "开始编译 (make -j${jobs}, W=0) ..."
-  make -j"${jobs}" W=0 || { log_warn "并行编译失败，回退单线程定位错误"; make -j1 W=0 V=s; }
+  # 注意：OpenWrt 的详细度开关是 V=s（不是内核的 W=0）。这里不加 V，
+  # 让默认的 -s 静默子 make 生效；失败时再回退到 V=s 单线程定位。
+  log_info "开始编译 (make -j${jobs}) ..."
+  make -j"${jobs}" || { log_warn "并行编译失败，回退单线程定位错误"; make -j1 V=s; }
 
   log_info "安装打包根目录并生成镜像 ..."
   make install
@@ -140,21 +153,18 @@ EOF
   cfg_bool kernel.lto && echo 'CONFIG_USE_LTO=y' >> .config
 
   # ------------------------------------------------------------- virtio
-  # x86/64 目标内核已 built-in virtio-net/-blk/-scsi/-balloon/-rng，
-  # 这里只补充少量 kmod 以覆盖非 built-in 场景（如 PCI hotplug）。
+  # x86/64 目标内核已 built-in virtio-net/-blk/-scsi/-balloon/-rng/-console
+  # （target/linux/x86/64/config-6.6 里均为 =y），上游也没有对应的
+  # kmod-virtio-* 包。这里不需要选任何包，virtiofs 见下一节。
   if cfg_bool features.virtio.enabled; then
-    cat >> .config <<'EOF'
-CONFIG_PACKAGE_kmod-virtio-console=y
-CONFIG_PACKAGE_kmod-virtio-balloon=y
-CONFIG_PACKAGE_kmod-virtio-rng=y
-EOF
+    log_info "virtio 设备驱动已 built-in 于 x86/64 内核，无需选择 kmod"
   fi
 
   # ---------------------------------------------------------- virtiofs
   if cfg_bool features.virtiofs.enabled; then
     cat >> .config <<'EOF'
 CONFIG_PACKAGE_kmod-fs-virtiofs=y
-CONFIG_PACKAGE_virtiofsd=n
+CONFIG_PACKAGE_kmod-fuse=y
 EOF
     cfg_bool features.virtiofs.fuse && \
       echo 'CONFIG_PACKAGE_fuse-utils=y' >> .config
@@ -164,7 +174,8 @@ EOF
   if cfg_bool features.p9fs.enabled; then
     cat >> .config <<'EOF'
 CONFIG_PACKAGE_kmod-fs-9p=y
-CONFIG_PACKAGE_kmod-virtio-9p=y
+CONFIG_PACKAGE_kmod-9pnet=y
+CONFIG_PACKAGE_kmod-9pvirtio=y
 EOF
   fi
 
@@ -176,19 +187,20 @@ CONFIG_PACKAGE_luci-app-wireguard=y
 EOF
   cfg_bool features.network.nftables && cat >> .config <<'EOF'
 CONFIG_PACKAGE_nftables-json=y
+CONFIG_PACKAGE_kmod-nft-core=y
 CONFIG_PACKAGE_kmod-nft-bridge=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 CONFIG_PACKAGE_kmod-nft-nat=y
+CONFIG_PACKAGE_kmod-nft-fib=y
 EOF
   cfg_bool features.network.iptables_nft && cat >> .config <<'EOF'
 CONFIG_PACKAGE_iptables-nft=y
 CONFIG_PACKAGE_ip6tables-nft=y
-CONFIG_PACKAGE_kmod-nft-iptables=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
 EOF
   if cfg_bool features.network.bridge; then
     cat >> .config <<'EOF'
 CONFIG_PACKAGE_bridge-utils=y
-CONFIG_PACKAGE_kmod-bridge=y
 EOF
     cfg_bool features.network.veth && echo 'CONFIG_PACKAGE_kmod-veth=y' >> .config
     cfg_bool features.network.tun  && cat >> .config <<'EOF'
@@ -228,8 +240,7 @@ EOF
 CONFIG_PACKAGE_kmod-sched-cake=y
 EOF
   cfg_bool features.performance.fq_codel && cat >> .config <<'EOF'
-CONFIG_PACKAGE_kmod-sched-fq-codel=y
-CONFIG_PACKAGE_kmod-sched-cake-virtual=n
+CONFIG_PACKAGE_kmod-sched-core=y
 EOF
   cfg_bool features.performance.irqbalance && cat >> .config <<'EOF'
 CONFIG_PACKAGE_irqbalance=y
@@ -272,8 +283,14 @@ CONFIG_PACKAGE_firewall4=y
 EOF
   fi
 
-  # 让 olddefconfig 补齐所有缺省值
-  make defconfig
+  # 让 defconfig 补齐所有缺省值。
+  # 失败时不要静默：OpenWrt 的静默子 make 会把真正的编译错误吞掉
+  # （只剩 "make -s -C scripts/config conf: build failed"），因此这里显式
+  # 失败重跑一次并打开 V=s，把真实错误暴露出来。
+  if ! make defconfig; then
+    log_err "make defconfig 失败，用 V=s 重跑以显示真实错误 ..."
+    make defconfig V=s
+  fi
   log_info ".config 生成完毕（$(grep -c '^CONFIG_' .config) 个符号）"
 }
 

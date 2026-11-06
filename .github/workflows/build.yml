@@ -47,7 +47,11 @@ jobs:
           fi
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "repo=$(node scripts/yq-compatible.mjs source.repo)" >> "$GITHUB_OUTPUT"
-          echo "cache-key=iwrt-dl-${BRANCH}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          # cache-key 不能含日期：含日期等于每天换一个新 key，主 key 永远
+          # 命中不了，只能靠 restore-keys 前缀兜底，等于没有缓存。
+          # 用"分支 + config.yml 内容哈希"，配置不变就能跨天命中。
+          CFG_HASH="$(sha256sum config.yml | cut -c1-12)"
+          echo "cache-key=iwrt-dl-${BRANCH}-${CFG_HASH}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: config
@@ -77,10 +81,13 @@ jobs:
           # 因此先探测候选版本是否存在，不存在则退回 python3-setuptools
           # （ImmortalWrt/OpenWrt 官方构建依赖列表在新发行版上的等价替代）。
           sudo apt-get update
+          # libncurses5-dev 在 Ubuntu 24.04 (noble) / Debian 13 已不存在
+          # （noble main 只有 libncurses-dev），写成它会让 apt-get install
+          # 直接报 "has no installation candidate" 并以非 0 退出。
           DEPS="build-essential clang flex bison g++ gawk gcc gcc-multilib \
-            gettext git libncurses5-dev libssl-dev \
+            gettext git libncurses-dev libssl-dev \
             rsync swig unzip zlib1g-dev file wget ccache qemu-utils \
-            libelf-dev ack time"
+            libelf-dev time"
           if [ -n "$(apt-cache policy python3-distutils | awk '/Candidate:/ && $2 != "(none)" {print $2}')" ]; then
             DEPS="$DEPS python3-distutils"
           else
@@ -88,7 +95,12 @@ jobs:
             DEPS="$DEPS python3-setuptools"
           fi
           # shellcheck disable=SC2086
+          # set -e 下 apt 失败会立即中断本 step，避免"依赖没装全却继续构建"
           sudo apt-get install -y --no-install-recommends $DEPS
+          # 二次校验关键头文件，缺一个就明确失败
+          for h in /usr/include/ncurses.h /usr/include/zlib.h /usr/include/openssl/ssl.h; do
+            [ -f "$h" ] || { echo "::error::缺少开发头文件 $h"; exit 1; }
+          done
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -111,6 +123,16 @@ jobs:
           fi
           echo "Node $(node --version) OK"
 
+      # 必须先 clone 再 restore cache：actions/cache restore 会在 path 不存在
+      # 时创建目录（~/openwrt/dl），那样 git clone 到已存在且非空的
+      # ~/openwrt 会直接失败 "destination path already exists and is not an
+      # empty directory"。
+      - name: Clone upstream (pinned branch)
+        working-directory: ${{ github.workspace }}
+        run: |
+          git clone --depth=1 --branch "${{ needs.config.outputs.branch }}" \
+            "${{ needs.config.outputs.repo }}" "${HOME}/openwrt"
+
       - name: Cache downloads + ccache
         uses: actions/cache@v4
         with:
@@ -120,12 +142,6 @@ jobs:
           key: ${{ needs.config.outputs.cache-key }}
           restore-keys: |
             iwrt-dl-${{ needs.config.outputs.branch }}-
-
-      - name: Clone upstream (pinned branch)
-        working-directory: ${{ github.workspace }}
-        run: |
-          git clone --depth=1 --branch "${{ needs.config.outputs.branch }}" \
-            "${{ needs.config.outputs.repo }}" "${HOME}/openwrt"
 
       - name: Build firmware
         env:
