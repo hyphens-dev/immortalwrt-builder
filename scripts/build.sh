@@ -135,11 +135,14 @@ generate_dotconfig() {
   board="$(cfg_required target.board)"
   subtarget="$(cfg_required target.subtarget)"
   # 基础：默认配置 + 关闭 initramfs-kernel（PVE 用不到），开启 gzip 镜像
+  # 注意：不要写 CONFIG_USE_IMAGELIST —— 该符号在 openwrt-24.10 中不存在
+  # （config/Config-build.in 里 0 处命中），会被 kconfig 静默丢弃。
+  # CONFIG_TARGET_PROFILE 的取值来自 target/linux/x86/image/generic.mk 里的
+  # `define Device/generic`。
   cat > .config <<EOF
 CONFIG_TARGET_${board}=y
 CONFIG_TARGET_${board}_${subtarget}=y
 CONFIG_TARGET_PROFILE="DEVICE_generic"
-CONFIG_USE_IMAGELIST=y
 EOF
 
   # 通用优化项

@@ -1,37 +1,42 @@
-# kmod-fs-virtiofs — VirtIO-FS 客户端内核模块
-# ImmortalWrt/OpenWrt openwrt-24.10 上游未提供该 kmod，本包补齐。
 #
-# 内核事实核对（Linux 6.6，fs/fuse/Makefile）：
-#   obj-$(CONFIG_FUSE_FS)    += fuse.o
-#   obj-$(CONFIG_VIRTIO_FS)  += virtiofs.o        <- 模块名是 virtiofs.ko
-#   virtiofs-y := virtio_fs.o                     <- 源文件名才是 virtio_fs.o
-# 所以 FILES 必须写 fs/fuse/virtiofs.ko，写 virtio_fs.ko 会在 make 阶段
-# 报 "No such file or directory" 并中断整个构建。
+# VirtIO-FS (virtiofs) client kernel module.
 #
-# fuse.ko 由上游 kmod-fuse（package/kernel/linux/modules/fs.mk）提供，
-# 这里只依赖它，不再重复声明，否则两个包会安装同一个 .ko。
+# Upstream openwrt-24.10 does not ship this kmod: the generic kernel config
+# has "# CONFIG_VIRTIO_FS is not set" and no KernelPackage declares it.
 #
-# 依赖：CONFIG_VIRTIO_FS 依赖 FUSE_FS 并 select VIRTIO（见 fs/fuse/Kconfig）。
-
-include $(TOPDIR)/rules.mk
-include $(INCLUDE_DIR)/kernel.mk
-
-PKG_NAME:=kmod-fs-virtiofs
-PKG_RELEASE:=1
-
-PKG_LICENSE:=GPL-2.0-only
-
-include $(INCLUDE_DIR)/package.mk
+# This file is a FRAGMENT, not a standalone package: package/kernel/linux/
+# Makefile does `include $(sort $(wildcard ./modules/*.mk))`, so it is
+# evaluated inside the `kernel` package's context. It must therefore contain
+# only `define KernelPackage/...` blocks - no `include rules.mk`, no
+# `PKG_NAME`, no `include package.mk`. Adding those overrides the kernel
+# package's own PKG_NAME/PKG_BUILD_DIR and produces build rules pointing at
+# build_dir/.../linux-x86_64/packages, which is an empty directory without a
+# Makefile ("No targets specified and no makefile found").
+#
+# Kernel facts (Linux 6.6, fs/fuse/Makefile):
+#   obj-$(CONFIG_FUSE_FS)   += fuse.o
+#   obj-$(CONFIG_VIRTIO_FS) += virtiofs.o     <- module is virtiofs.ko
+#   virtiofs-y := virtio_fs.o                 <- that is the *source* file
+# so FILES must name fs/fuse/virtiofs.ko. fuse.ko itself is provided by
+# upstream kmod-fuse, so it is not repeated here.
+#
+# SUBMENU is spelled out instead of $(FS_MENU) because `sort` places
+# "fs-virtiofs.mk" before "fs.mk" ('-' 0x2D < '.' 0x2E), i.e. before
+# FS_MENU is defined.
+#
+# fs/fuse/Kconfig: VIRTIO_FS depends on FUSE_FS and selects VIRTIO, both of
+# which are already satisfied (kmod-fuse pulls FUSE_FS, virtio is built into
+# the x86/64 target kernel).
 
 define KernelPackage/fs-virtiofs
-  SUBMENU:=$(FS_MENU)
+  SUBMENU:=Filesystems
   TITLE:=VirtIO-FS client filesystem support
-  DEPENDS:=+kmod-fuse @TARGET_x86_64||TARGET_x86
+  DEPENDS:=+kmod-fuse
+  KCONFIG:= \
+	CONFIG_VIRTIO_FS
   FILES:= \
 	$(LINUX_DIR)/fs/fuse/virtiofs.ko
   AUTOLOAD:=$(call AutoLoad,81,virtiofs)
-  KCONFIG:= \
-	CONFIG_VIRTIO_FS
 endef
 
 define KernelPackage/fs-virtiofs/description

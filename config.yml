@@ -57,11 +57,19 @@ features:
     mmio: true
 
   # VirtIO-FS —— 在 guest 内挂载 PVE 宿主机共享目录
-  # 上游 24.10 未提供该模块，本仓库自带 package/kernel/kmod-fs-virtiofs。
+  # 默认关闭：该 kmod 由本仓库在 package/kernel/linux/modules/fs-virtiofs.mk
+  # 中自研补齐（上游 openwrt-24.10 未提供）。它此前破坏过整体构建：片段里
+  # 误加了 PKG_NAME / include package.mk，覆盖了 kernel 包自己的
+  # PKG_BUILD_DIR，使其指向空目录 linux-x86_64/packages，从而报
+  # "No targets specified and no makefile found" 并使 package/kernel/linux
+  # 编译失败。现已改为纯片段写法（与 fs.mk 结构一致），但请先在基础构建
+  # 验证通过后再打开。
+  # 需要开启时：先确认 make defconfig 后 .config 含
+  # CONFIG_PACKAGE_kmod-fs-virtiofs=y，再跑构建。
+  # 9p（features.p9fs）是功能等价的替代，且全部使用上游包。
   virtiofs:
-    enabled: true
+    enabled: false
     fuse: true
-
   # 9P 文件系统（备选的主机-客户机共享通道）
   p9fs:
     enabled: true

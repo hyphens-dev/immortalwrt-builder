@@ -1,7 +1,7 @@
 # VirtIO-FS 使用指南
 
 ImmortalWrt 上游 openwrt-24.10 **没有** `kmod-fs-virtiofs` 包，本仓库在
-`package/kernel/linux/modules/fs-virtiofs.mk` 中自带该 KernelPackage：
+`package/kernel/linux/modules/fs-virtiofs.mk` 中自带该 KernelPackage。**该特性默认关闭**，请先让基础构建跑通，再把 `config.yml` 的 `features.virtiofs.enabled` 置为 true：
 
 - KCONFIG：`CONFIG_FUSE_FS=y`、`CONFIG_VIRTIO_FS=y`（内核 6.6 的
   `fs/fuse/virtio_fs.ko` 已包含 virtiofs 客户端）
