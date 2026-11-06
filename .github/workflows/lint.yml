@@ -20,11 +20,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # reviewdog/action-actionlint@v1 已基本停止维护，在部分 runner 上会因
-      # 拉取 ghcr.io/reviewdog/action-actionlint 镜像失败而报错。改用官方
-      # rhysd/actionlint，行为一致且更可靠。
-      - name: actionlint
-        uses: rhysd/actionlint@v1
+      # 不依赖第三方 action（reviewdog/action-actionlint 与 rhysd/actionlint
+      # 在本仓库环境都拉取失败），直接下载官方 release 二进制并固定版本，
+      # 保证可复现。
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          VERSION="1.7.7"
+          curl -sSLf -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          actionlint -color .github/workflows/*.yml
 
   parser-tests:
     runs-on: ubuntu-24.04
