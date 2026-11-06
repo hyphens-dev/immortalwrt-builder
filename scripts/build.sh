@@ -110,7 +110,9 @@ main() {
   make install
   # 镜像阶段并行度降低：rootfs 组装会 fork 大量 cp/rsync，argv+env 超限即 E2BIG
   make image -j"$( (( jobs > 4 )) && echo 4 || echo "${jobs}" )"
-  cfg_bool features.luci.enabled && make package/luci/compile || true
+  if cfg_bool features.luci.enabled; then
+    make package/luci/compile || true
+  fi
 
   # ------------------------------------------------------------ 6. dist
   local tdir
@@ -125,7 +127,7 @@ main() {
 
   write_manifest "${OUT_DIR}/manifest.json" "${board}" "${subtarget}" "${profile}"
   log_info "完成！产物位于 ${OUT_DIR}/"
-  ls -lh "${OUT_DIR}" | sed 's/^/  /'
+  find "${OUT_DIR}" -maxdepth 1 -type f -printf '  %f %s bytes\n'
 }
 
 generate_dotconfig() {

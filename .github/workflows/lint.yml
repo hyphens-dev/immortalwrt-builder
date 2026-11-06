@@ -20,7 +20,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: reviewdog/action-actionlint@v1
+      # reviewdog/action-actionlint@v1 已基本停止维护，在部分 runner 上会因
+      # 拉取 ghcr.io/reviewdog/action-actionlint 镜像失败而报错。改用官方
+      # rhysd/actionlint，行为一致且更可靠。
+      - name: actionlint
+        uses: rhysd/actionlint@v1
 
   parser-tests:
     runs-on: ubuntu-24.04

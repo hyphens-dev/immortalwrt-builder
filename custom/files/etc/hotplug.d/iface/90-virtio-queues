@@ -6,17 +6,30 @@
 [ "$INTERFACE" = "lan" ] || [ "$INTERFACE" = "wan" ] || exit 0
 
 dev="$1"
-# 找到底层物理口（bridge 场景取第一个 slave，直接口场景即自身）
-for port in $(ls /sys/class/net/"${dev}"/brif 2>/dev/null); do
-	phys="$port"
+# 找到底层物理口（bridge 场景取第一个 slave，直接口场景即自身）。
+# 用 glob 而非 ls 输出遍历：文件名含空格/换行时 ls 解析会错。
+phys="$dev"
+for port in /sys/class/net/"${dev}"/brif/*; do
+	[ -e "$port" ] || continue
+	phys="${port##*/}"
+	break
 done
-[ -n "${phys:-}" ] || phys="$dev"
 
-qmax=$(cat "/sys/class/net/${phys}/queues" 2>/dev/null | wc -w)
-[ "${qmax:-0}" -gt 1 ] || exit 0
+# 队列数从 sysfs 的目录项数推断，避免 cat 管道
+qmax=0
+for _ in /sys/class/net/"${phys}"/queues/*; do
+	[ -e "$_" ] || continue
+	qmax=$(( qmax + 1 ))
+done
+[ "${qmax}" -gt 1 ] || exit 0
 
 if command -v ethtool >/dev/null 2>&1; then
-	combined=$(( qmax < $(nproc) ? qmax : $(nproc) ))
-	ethtool -L "$phys" combined "$combined" 2>/dev/null
+	ncpu="$(nproc 2>/dev/null || echo 1)"
+	if [ "${qmax}" -lt "${ncpu}" ]; then
+		combined="${qmax}"
+	else
+		combined="${ncpu}"
+	fi
+	ethtool -L "$phys" combined "${combined}" 2>/dev/null
 fi
 exit 0
