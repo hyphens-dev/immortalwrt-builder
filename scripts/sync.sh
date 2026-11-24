@@ -41,7 +41,13 @@ main() {
     log_info "无更新：${remote_head:0:12} 已构建过"
     exit 10
   fi
-  log_info "发现上游更新: ${recorded:0:12:-none} -> ${remote_head:0:12}"
+  # ${var:0:12:-none} 是非法展开（切片与 :- 默认值不能混用），
+  # 当 .upstream-built 不存在、recorded 为空串时会直接报
+  # "syntax error in expression"，set -e 使脚本以非 10 退出，导致
+  # Sync upstream 工作流每次都失败。这里先算好显示值。
+  local recorded_short="none"
+  [[ -n "${recorded}" ]] && recorded_short="${recorded:0:12}"
+  log_info "发现上游更新: ${recorded_short} -> ${remote_head:0:12}"
   echo "${remote_head}"
 }
 
