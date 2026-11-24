@@ -24,9 +24,27 @@ source "${SCRIPT_DIR}/utils.sh"
 SRC_DIR="${SRC_DIR:-${REPO_ROOT}/openwrt}"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 
+# 构建前检查可用空间：全量 x86_64 + LuCI 构建需要约 12-18GB，
+# 空间不足时应在 30 秒内明确失败，而不是编译两小时后
+# 在 make install/image 阶段报 "No space left on device"。
+check_disk_space() {
+  local need_gb="${1:-12}"
+  local avail_gb
+  avail_gb="$(df -BG --output=avail "${SRC_DIR:-${REPO_ROOT}}" 2>/dev/null | tail -1 | tr -dc '0-9')"
+  [[ -n "${avail_gb}" ]] || { log_warn "无法读取磁盘可用空间，跳过检查"; return 0; }
+  log_info "磁盘可用空间: ${avail_gb}G（建议 >= ${need_gb}G）"
+  df -h "${SRC_DIR:-${REPO_ROOT}}" | sed 's/^/        /' >&2
+  if (( avail_gb < need_gb )); then
+    log_err "磁盘空间不足: 可用 ${avail_gb}G < 需要 ${need_gb}G"
+    log_err "处理方法：减少选择的软件包 / 关闭 features.* 项 / 使用更大磁盘的 runner"
+    exit 1
+  fi
+}
+
 main() {
   log_info "=== ImmortalWrt PVE Builder ==="
   validate_config
+  check_disk_space "${BUILD_MIN_DISK_GB:-12}"
 
   local repo branch tag board subtarget profile hostname lan_ip
   repo="$(cfg_required source.repo)"
@@ -145,14 +163,18 @@ CONFIG_TARGET_${board}_${subtarget}=y
 CONFIG_TARGET_PROFILE="DEVICE_generic"
 EOF
 
-  # 通用优化项
+  # 通用选项
+  #
+  # 刻意不开 CONFIG_ALL_KMODS：它会编译上游全部数千个内核模块（无线、ARM
+  # 板级、各类 GPU/网卡），在 4 核 runner 上要 1.5h+ 且占用十几 GB 磁盘，
+  # 是构建失败/超时的首要原因。PVE 场景只需要下面按 feature 选中的那些 kmod。
+  # 同理不开 CONFIG_DEVEL：它会打开调试信息，staging/build_dir 体积翻倍。
+  # rootfs 512MB 对路由器固件足够，1024MB 会让镜像组装多占一倍空间。
   cat >> .config <<'EOF'
-# 基础体验
-CONFIG_ALL_KMODS=y
-CONFIG_DEVEL=y
 CONFIG_CCACHE=y
 CONFIG_COLLECT_KERNEL_DEBUG=n
-CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
+CONFIG_TARGET_KERNEL_PARTSIZE=16
 EOF
 
   cfg_bool kernel.lto && echo 'CONFIG_USE_LTO=y' >> .config

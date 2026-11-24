@@ -144,12 +144,29 @@ jobs:
             iwrt-dl-${{ needs.config.outputs.branch }}-
 
       - name: Build firmware
+        id: build_fw
         env:
           SRC_DIR: ${{ github.workspace }}/openwrt
         run: |
+          set -o pipefail
           mv "${HOME}/openwrt" "${SRC_DIR}"
           export SKIP_CLONE=1
-          bash scripts/build.sh
+
+          # 后台每 60s 记录一次磁盘和内存，便于事后判断是不是空间/内存耗尽。
+          ( while true; do
+              printf '[monitor %s] ' "$(date -u +%H:%M:%S)"
+              df -h "${SRC_DIR}" | tail -1
+              sleep 60
+            done ) > "${SRC_DIR}/disk-monitor.log" 2>&1 &
+          MONITOR_PID=$!
+
+          set +e
+          bash scripts/build.sh 2>&1 | tee "${SRC_DIR}/build.log"
+          BUILD_RC=${PIPESTATUS[0]}
+          set -e
+
+          kill "${MONITOR_PID}" 2>/dev/null || true
+          exit "${BUILD_RC}"
 
       - name: Record built upstream commit (artifact, never pushed to main)
         run: |
@@ -168,7 +185,35 @@ jobs:
             : > dist/sha256sums
           fi
 
+      # 失败也要上传：否则看不到产物、也拿不到日志，无法定位问题。
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_id }}
+          path: |
+            ${{ github.workspace }}/openwrt/build.log
+            ${{ github.workspace }}/openwrt/disk-monitor.log
+            ${{ github.workspace }}/openwrt/.config
+            ${{ github.workspace }}/openwrt/logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Show build log tail on failure
+        if: failure()
+        run: |
+          LOG="${GITHUB_WORKSPACE}/openwrt/build.log"
+          if [ -f "$LOG" ]; then
+            echo "--- 磁盘监控（最后 6 条） ---"
+            tail -6 "${GITHUB_WORKSPACE}/openwrt/disk-monitor.log" 2>/dev/null || true
+            echo "--- 构建日志（最后 120 行） ---"
+            tail -120 "$LOG"
+          else
+            echo "no build.log"
+          fi
+
       - name: Upload firmware artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-pve-x86-64
@@ -179,7 +224,7 @@ jobs:
             dist/sha256sums
             dist/manifest.json
             upstream-built-marker
-          if-no-files-found: error
+          if-no-files-found: warn
 
   release:
     needs: [config, build]
