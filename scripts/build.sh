@@ -122,7 +122,11 @@ main() {
   # 注意：OpenWrt 的详细度开关是 V=s（不是内核的 W=0）。这里不加 V，
   # 让默认的 -s 静默子 make 生效；失败时再回退到 V=s 单线程定位。
   log_info "开始编译 (make -j${jobs}) ..."
-  make -j"${jobs}" || { log_warn "并行编译失败，回退单线程定位错误"; make -j1 V=s; }
+  if ! make -j"${jobs}" 2>&1 | tee "${SRC_DIR}/make.log"; then
+    diagnose_build_failure "${SRC_DIR}/make.log"
+    log_err "编译失败，详见上方的定位输出与 ${SRC_DIR}/make.log"
+    exit 1
+  fi
 
   log_info "安装打包根目录并生成镜像 ..."
   make install
@@ -146,6 +150,62 @@ main() {
   write_manifest "${OUT_DIR}/manifest.json" "${board}" "${subtarget}" "${profile}"
   log_info "完成！产物位于 ${OUT_DIR}/"
   find "${OUT_DIR}" -maxdepth 1 -type f -printf '  %f %s bytes\n'
+}
+
+# 并行 make 失败后，OpenWrt 只会打印一句
+#   "make -r world: build failed. Please re-run make with -j1 V=s ..."
+# 真正的错误被静默子 make 吞掉。这里从日志里找出失败的具体包，
+# 再用 V=s 单独重编它，把真实错误暴露出来——比整体 -j1 重编快几个数量级。
+diagnose_build_failure() {
+  local logfile="$1"
+
+  log_warn "==== 构建失败诊断 ===="
+  if [[ ! -f "${logfile}" ]]; then
+    log_warn "找不到 ${logfile}，跳过诊断"
+    return 0
+  fi
+
+  # 1) 直接打印日志尾部，这是信息量最大的一段
+  log_warn "---- 日志最后 60 行 ----"
+  tail -60 "${logfile}" >&2 || true
+
+  # 2) 找出明确报错的包（多种日志格式都存在）
+  local failed_pkg=""
+  failed_pkg="$(grep -oE 'ERROR: package/[a-zA-Z0-9._/-]+ failed to build' "${logfile}" \
+                 | tail -1 | sed -E 's|ERROR: ||; s| failed to build||')"
+  if [[ -z "${failed_pkg}" ]]; then
+    failed_pkg="$(grep -oE 'make\[[0-9]+\]: \*\*\* \[[^]]*: package/[a-zA-Z0-9._/-]+\]' "${logfile}" \
+                   | tail -1 | sed -E 's|.*: (package/[a-zA-Z0-9._/-]+)\]|\1|')"
+  fi
+  if [[ -z "${failed_pkg}" ]]; then
+    failed_pkg="$(grep -oE '^make\[[0-9]+\]: \*\*\* .*Error' "${logfile}" | tail -1)"
+  fi
+
+  if [[ -z "${failed_pkg}" ]]; then
+    log_warn "未能从日志中识别失败目标，请查看上面的日志尾部"
+    return 0
+  fi
+
+  log_warn "识别到失败目标: ${failed_pkg}"
+
+  # 3) 单独用 V=s 重编该目标，真实错误会直接打印出来
+  if [[ "${failed_pkg}" == package/* ]]; then
+    log_warn "---- 单独重编 ${failed_pkg} (V=s) 以显示真实错误 ----"
+    make "${failed_pkg}/compile" V=s 2>&1 | tail -80 >&2 || true
+  fi
+
+  # 4) 该包自己的 build log 通常有最详细的记录
+  local f
+  local found=0
+  while IFS= read -r -d '' f; do
+    found=1
+    log_warn "---- ${f} (最后 40 行) ----"
+    tail -40 "${f}" >&2 || true
+  done < <(find "${SRC_DIR}/logs" -name '*.txt' -newermt '-2 hours' -print0 2>/dev/null)
+  if (( found == 0 )); then
+    log_warn "未找到包级日志（logs/*.txt）"
+  fi
+  log_warn "==== 诊断结束 ===="
 }
 
 generate_dotconfig() {
