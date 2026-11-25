@@ -170,8 +170,15 @@ jobs:
 
       - name: Record built upstream commit (artifact, never pushed to main)
         run: |
-          git -C openwrt rev-parse HEAD > upstream-built-marker
-          cat upstream-built-marker
+          # 写进 dist/ 而不是仓库根：actions/upload-artifact@v4 会用所有匹配
+          # 路径的最近公共祖先作为 artifact 内的根目录。如果列表里混入
+          # 仓库根的 upstream-built-marker，LCA 就是仓库根，artifact 内部会
+          # 带上 "dist/" 前缀；下载到 dist/ 后变成 dist/dist/*.img.gz，
+          # release 步骤的 dist/*.img.gz 就全部匹配不到 —— 表现为
+          # 成功创建 Release 但一个 asset 都没有。
+          mkdir -p dist
+          git -C openwrt rev-parse HEAD > dist/upstream-built-marker
+          cat dist/upstream-built-marker
 
       - name: Copy sha256sums to dist (参考 luyanci ci.yml L184-L199)
         run: |
@@ -217,14 +224,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-pve-x86-64
-          path: |
-            dist/*.img.gz
-            dist/*.manifest
-            dist/config.buildinfo
-            dist/sha256sums
-            dist/manifest.json
-            upstream-built-marker
-          if-no-files-found: warn
+          # 只用 dist/ 一个根目录，artifact 内部结构就是 dist/ 的平铺内容，
+          # 下载到 dist/ 后路径与 release 步骤的 glob 完全一致。
+          path: dist/
+          if-no-files-found: error
 
   release:
     needs: [config, build]
@@ -273,8 +276,11 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: ${{ env.NAME }}
           body_path: Body.md
+          # 与 scripts/build.sh 收集的文件类别保持一致，避免漏发。
           files: |
             dist/sha256sums
             dist/*.img.gz
+            dist/*.bin
             dist/*.manifest
             dist/manifest.json
+            dist/config.buildinfo
