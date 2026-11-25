@@ -246,11 +246,31 @@ jobs:
           path: dist
 
       - name: Generate release informations
+        env:
+          # 用带 token 的 gh api，不要用匿名 curl：匿名调用在共享 runner IP 上
+          # 经常被限流，返回体变成
+          #   {"message":"API rate limit exceeded ..."}
+          # 于是 jq -r .created_at 得到 null，date -d null 直接失败，
+          # 表现为 release job 偶发红（run 30 通过、run 31 失败）。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
+          set -euo pipefail
+
+          # 依次尝试：gh api（已认证）-> 本地时间。任何一步失败都不会中断。
+          TIME=""
+          if command -v gh >/dev/null 2>&1; then
+            TIME="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"                       --jq '.created_at // empty' 2>/dev/null || true)"
+          fi
+          # 注意要显式判断空串：GNU date 把 `date -d ""` 当作"今天 00:00"并
+          # 成功返回，会产出 ...-000000 这种垃圾 tag。
+          if [ -z "${TIME}" ] || ! date -d "${TIME}" +%s >/dev/null 2>&1; then
+            echo "::warning::无法从 API 获取 run.created_at，退回使用当前时间"
+            TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          echo "构建时间: ${TIME}"
 
           TAG="pve-build-$(date -d "${TIME}" -u +'%Y%m%d-%H%M%S')-${GITHUB_SHA:0:8}"
-          echo "TAG=$TAG" >>"$GITHUB_ENV"
+          echo "TAG=${TAG}" >>"$GITHUB_ENV"
 
           cat <<EOF | sed -E 's/^  //' >Release.md
             ImmortalWrt PVE $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
@@ -262,11 +282,13 @@ jobs:
             Upstream commit: \`$(cat dist/upstream-built-marker 2>/dev/null || echo unknown)\`
 
             ## SHA256
-            $(awk '{gsub(/^\*/,""); printf "%s: `%s`\n", $2, $1}' dist/sha256sums 2>/dev/null)
+            $(awk '{gsub(/^\*/,""); if (NF >= 2) printf "%s: `%s`\n", $2, $1}' \
+                dist/sha256sums 2>/dev/null || echo "_未生成校验和_")
           EOF
 
-          echo "NAME=$(head --line=1 Release.md)" >>"$GITHUB_ENV"
-          tail --line=+2 Release.md >Body.md
+          echo "NAME=$(head -n 1 Release.md)" >>"$GITHUB_ENV"
+          tail -n +2 Release.md >Body.md
+          echo "--- Release.md 预览 ---"; head -n 12 Release.md
 
       - name: Release
         uses: softprops/action-gh-release@v2
