@@ -128,13 +128,15 @@ main() {
     exit 1
   fi
 
-  log_info "安装打包根目录并生成镜像 ..."
-  make install
-  # 镜像阶段并行度降低：rootfs 组装会 fork 大量 cp/rsync，argv+env 超限即 E2BIG
-  make image -j"$( (( jobs > 4 )) && echo 4 || echo "${jobs}" )"
-  if cfg_bool features.luci.enabled; then
-    make package/luci/compile || true
-  fi
+  # 不要再调用 `make install` 或 `make image`：OpenWrt 没有这两个顶层目标。
+  # 裸 make 的默认目标就是 world（见仓库根 Makefile:133），而 world 已经包含
+  #   target/stamp-compile package/stamp-compile
+  #   package/stamp-install target/stamp-install   <- 这一步就在生成镜像
+  #   package/index json_overview_image_info checksum
+  # 所以上面 make 成功后镜像已经躺在 bin/targets/<board>/<subtarget>/ 里了。
+  # 之前多出来的 `make install` 正是本次失败的根因：
+  #   make -r install: build failed ... Error 1
+  log_info "编译与镜像生成完成（world 已包含 target/stamp-install）"
 
   # ------------------------------------------------------------ 6. dist
   local tdir
@@ -144,8 +146,28 @@ main() {
     exit 1
   fi
   mkdir -p "${OUT_DIR}"
-  cp -f "${tdir}"/*.img.gz "${tdir}"/*.bin "${tdir}"/*.manifest "${tdir}/config.buildinfo" "${OUT_DIR}/" 2>/dev/null || \
-    cp -rf "${tdir}/." "${OUT_DIR}/"
+
+  # 逐类复制并统计，缺哪类就明确报错。之前用的是
+  #   cp -f A/*.img.gz B/*.bin ... || cp -rf "${tdir}/." ...
+  # 只要任一通配符没匹配到，整个 cp 就失败并退回"全目录复制"，
+  # 于是 manifest/config.buildinfo 之外的东西也会混进 dist/，
+  # 而且"镜像没生成"这种致命问题会被静默掩盖。
+  local copied=0 pattern f
+  for pattern in '*.img.gz' '*.bin' '*.manifest' 'config.buildinfo' 'sha256sums' '*.iso'; do
+    # 用 find 而不是 glob：glob 在无匹配时会原样返回模式串，
+    # 且必须不加引号才能展开（会触发 shellcheck SC2066）。
+    while IFS= read -r -d '' f; do
+      cp -f "${f}" "${OUT_DIR}/"
+      copied=$((copied + 1))
+    done < <(find "${tdir}" -maxdepth 1 -type f -name "${pattern}" -print0 2>/dev/null)
+  done
+
+  if (( copied == 0 )); then
+    log_err "产物目录 ${SRC_DIR}/${tdir} 存在但为空——镜像未生成"
+    log_err "请检查上面的 make 输出是否真的产出了 x86/64 镜像"
+    exit 1
+  fi
+  log_info "已收集 ${copied} 个产物文件"
 
   write_manifest "${OUT_DIR}/manifest.json" "${board}" "${subtarget}" "${profile}"
   log_info "完成！产物位于 ${OUT_DIR}/"
