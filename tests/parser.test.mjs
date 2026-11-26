@@ -12,19 +12,29 @@ const configText = readFileSync(join(here, "..", "config.yml"), "utf8");
 
 test("parses real config.yml into nested object", () => {
   const tree = parseYaml(configText);
-  assert.equal(tree.source.branch, "openwrt-24.10");
+  // 不要在这里断言具体的上游版本/内核版本：config.yml 会随上游 stable
+  // release 更新（例如 24.10 -> 25.12、内核 6.6 -> 6.12），写死会让
+  // parser-tests 在纯配置变更时误报。这里只校验结构与类型。
+  assert.equal(typeof tree.source.branch, "string");
+  assert.match(tree.source.branch, /^openwrt-/);
+  assert.equal(typeof tree.source.repo, "string");
+  assert.equal(tree.target.board, "x86");
   assert.equal(tree.target.subtarget, "64");
   assert.equal(tree.features.virtio.enabled, true);
+  assert.equal(tree.features.virtiofs.enabled, true);
   assert.equal(tree.features.network.wireguard, true);
   assert.equal(tree.features.performance.bbr, true);
   assert.equal(tree.features.luci.theme, "bootstrap");
   assert.equal(tree.build.jobs, 0);
+  assert.equal(typeof tree.kernel.version, "string");
+  assert.match(tree.kernel.version, /^\d+\.\d+$/);
 });
 
 test("dotted path lookup", () => {
   const tree = parseYaml(configText);
   assert.equal(getPath(tree, "features.proxy.nikki"), false);
-  assert.equal(getPath(tree, "kernel.version"), "6.6");
+  // 版本随上游变化，这里只要求拿得到形如 6.12 的字符串
+  assert.match(getPath(tree, "kernel.version"), /^\d+\.\d+$/);
   assert.equal(getPath(tree, "does.not.exist"), undefined);
 });
 
