@@ -21,3 +21,7 @@ node_modules/
 .idea/
 *.swp
 .DS_Store
+
+# 临时/调试产物
+r.json
+*.json.tmp
