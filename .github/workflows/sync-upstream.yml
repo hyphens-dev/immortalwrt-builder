@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: read
+  # 触发 build.yml 需要 actions: write（gh workflow run 走 workflow_dispatch API）
+  actions: write
 
 jobs:
   check:
@@ -31,15 +33,30 @@ jobs:
             fi
           fi
       # 本工作流刻意不把仓库 rebase 到 ImmortalWrt 之上（两仓库没有共同
-      # 历史、源码树数 GB）。仅通过 repository_dispatch 触发 build.yml；
-      # 成功构建的上游 commit 以 `upstream-built-marker` 构件发布，
-      # 绝不直接推送到 main（避免与并发构建竞争）。
+      # 历史、源码树数 GB）。这里只做两件事：检测上游是否有新提交，
+      # 然后触发 build.yml。成功构建的上游 commit 以 dist/upstream-built-marker
+      # 构件形式发布，绝不直接推送到 main（避免与并发构建竞争）。
       - name: Trigger build
         if: steps.sync.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          COMMIT: ${{ steps.sync.outputs.commit }}
         run: |
-          curl -sf -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ secrets.REPO_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${{ github.repository }}/dispatches" \
-            -d '{"event_type":"upstream-update","client_payload":{"commit":"${{ steps.sync.outputs.commit }}"}}'
+          set -euo pipefail
+
+          # 为什么不用 repository_dispatch：
+          # 用 GITHUB_TOKEN 创建的 repository_dispatch 事件，GitHub 不会用来
+          # 触发 workflow（防递归保护）。之前那套
+          #   curl -X POST .../dispatches -H "Authorization: Bearer REPO_TOKEN"
+          # 既依赖一个很可能根本没配置的 secret（Bearer 为空 -> 401），
+          # 又在本仓库自己的 token 下永远不会真正拉起 build.yml。
+          # workflow_dispatch 走 API 可以由 GITHUB_TOKEN 触发，
+          # 前提是本 job 拥有 actions: write。
+          echo "上游提交: ${COMMIT}"
+          gh workflow run build.yml --ref "${REF}"
+
+          sleep 10
+          gh run list --workflow=build.yml --limit 3 \
+            --json databaseId,status,event,headSha,createdAt || true

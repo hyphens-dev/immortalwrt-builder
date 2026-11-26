@@ -69,8 +69,22 @@ main() {
 
   # --------------------------------------------------------------- 2. feeds
   log_info "安装 feeds ..."
+  # 追加而不是覆盖 custom/feeds.conf。
+  # 上游 feeds.conf.default 在不同版本里格式不同：24.10 用 `;<branch>`，
+  # 25.12 用 `^<commit>` 并多一个 video feed。整体覆盖会把旧版本的 feed
+  # 塞进新源码树，导致 luci/packages 与内核不匹配。
   if [[ -f "${REPO_ROOT}/custom/feeds.conf" ]]; then
-    cp "${REPO_ROOT}/custom/feeds.conf" feeds.conf.default
+    log_info "追加自定义 feeds: ${REPO_ROOT}/custom/feeds.conf"
+    while IFS= read -r line; do
+      # 跳过空行与注释
+      [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+      if grep -qxF "${line}" feeds.conf.default 2>/dev/null; then
+        log_info "  feed 已存在，跳过: ${line}"
+        continue
+      fi
+      printf '%s\n' "${line}" >> feeds.conf.default
+      log_info "  已追加: ${line}"
+    done < "${REPO_ROOT}/custom/feeds.conf"
   fi
   ./scripts/feeds update -a
   ./scripts/feeds install -a
