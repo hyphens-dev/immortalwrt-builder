@@ -32,8 +32,13 @@ vim config.yml          # 按需调整功能开关 / LAN IP / 主题
 ```bash
 gunzip immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz
 qm importdisk <VMID> immortalwrt-*.img local-lvm
-# 设备: virtio0(virtio-scsi), net0=virtio,bridge=vmbr0; CPU type=host;
-# 可选 hostpci/vhost-user-fs 共享目录给 virtiofs
+# 双网卡主路由（默认 nic_layout=router）：
+#   net0=virtio,bridge=vmbr0   -> guest eth0 = WAN
+#   net1=virtio,bridge=vmbr1   -> guest eth1 = LAN（br-lan，10.10.10.254/24，带 DHCP）
+# CPU type=host；磁盘 virtio0(virtio-scsi)
+# 可选 vhost-user-fs 共享目录给 virtiofs
+#
+# 首次启动请见 docs/first-boot.md（地址获取、root 密码、SSH/Web 排查）
 ```
 
 ## 目录结构

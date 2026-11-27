@@ -1,27 +1,31 @@
 # network — ImmortalWrt PVE Builder rootfs overlay
-# proto/地址等占位符由 scripts/build.sh 依据 config.yml 渲染。
-# eth0 = PVE virtio-net 网卡。
+# 占位符由 scripts/build.sh 依据 config.yml 的 build.* 渲染。
 #
-# 默认 proto=dhcp：接上 PVE 网桥后由上游 DHCP 分配地址，开机即可 SSH/Web。
-# 想当旁路由固定 IP，把 config.yml 的 build.net_mode 改为 static 并设置
-# build.lan_ip / build.lan_gateway。
-
-config device
-	option name 'br-lan'
-	option type 'bridge'
-	list ports 'eth0'
+# 布局 router : eth0 -> wan，eth1 -> lan
+#              （PVE: net0=vmbr0 作 WAN，net1=vmbr1 作 LAN）
+# 布局 single : eth0 -> lan（单网卡旁路由）
+#
+# 若实际只有一块网卡（eth1 不存在），首次启动的 /etc/uci-defaults/99-pve-defaults
+# 会自动把 eth0 接到 br-lan 并把 wan 置为 none，避免整机失联。
 
 config interface 'loopback'
 	option device 'lo'
 	option proto 'static'
-	option ipaddr '127.0.0.1'
-	option netmask '255.0.0.0'
+	list ipaddr '127.0.0.1/8'
 
 config globals 'globals'
-	option ula_prefix 'fdp0:5ee:dead::/48'
+	option ula_prefix 'fd87:4c02:27d6::/48'
 	option packet_steering '1'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+@LAN_PORTS@
 
 config interface 'lan'
 	option device 'br-lan'
-	option proto '@LAN_PROTO@'
-@LAN_STANZA@
+	option proto 'static'
+	option ip6assign '60'
+@LAN_ADDRS@
+
+@WAN_BLOCK@

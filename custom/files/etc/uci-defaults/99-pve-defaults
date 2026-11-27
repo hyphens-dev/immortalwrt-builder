@@ -3,12 +3,37 @@
 # @ROOT_PASSWORD@ 由 scripts/build.sh 依据 config.yml 的 build.root_password 渲染。
 #
 # 注意：OpenWrt 默认 root 无密码，而 dropbear 在 root 无密码时会拒绝密码登录，
-# 表现就是"SSH 连不上/服务像是没起"。这里在首次启动时把密码设上，
+# 表现为"SSH 连不上/服务像是没起"。这里在首次启动时把密码设上，
 # 保证开箱即可 SSH（请登录后立刻 passwd 修改）。
 
 # build.root_password 为空时 scripts/build.sh 会删除本文件，因此这里直接设置
 printf 'root:%s\n' '@ROOT_PASSWORD@' | chpasswd
 
+# ---------------------------------------------------------------------------
+# 网口兜底
+#
+# 固件按 nic_layout=router 生成：eth0=wan，eth1=lan。
+# 如果 VM 实际只挂了一块网卡（eth1 不存在），br-lan 就会没有端口，
+# 整机彻底失联。这里检测到该情况就把 eth0 挪进 br-lan，并把 wan 置为 none，
+# 变成单网卡直连模式，至少还能进 LuCI 改配置。
+# ---------------------------------------------------------------------------
+if [ -e /sys/class/net/eth0 ] && [ ! -e /sys/class/net/eth1 ]; then
+	echo "uci-defaults: 只检测到 eth0，切换为单网卡模式（eth0 -> lan, wan=none）"
+
+	# br-lan 的端口列表换成 eth0
+	uci -q delete network.@device[0].ports
+	uci -q add_list network.@device[0].ports='eth0'
+
+	# wan/wan6 失去载体会报错，置 none 更干净
+	uci -q set network.wan.proto='none' 2>/dev/null || true
+	uci -q delete network.wan.device 2>/dev/null || true
+	uci -q set network.wan6.proto='none' 2>/dev/null || true
+	uci -q commit network
+fi
+
+# ---------------------------------------------------------------------------
+# 管理通道
+# ---------------------------------------------------------------------------
 # dropbear 允许密码认证（默认就是 on，这里显式确保）
 uci -q get dropbear.@dropbear[0] >/dev/null 2>&1 || uci -q add dropbear dropbear
 uci -q set dropbear.@dropbear[0].PasswordAuth='on'
@@ -17,7 +42,7 @@ uci -q set dropbear.@dropbear[0].Port='22'
 uci -q commit dropbear
 
 # LuCI/uhttpd 若存在则确保开机自启
-for svc in uhttpd dropbear firewall; do
+for svc in uhttpd dropbear firewall dnsmasq; do
 	[ -x "/etc/init.d/${svc}" ] && /etc/init.d/${svc} enable >/dev/null 2>&1
 done
 

@@ -1,5 +1,62 @@
 # 首次开机：SSH 与 Web 界面
 
+## 双网卡主路由（推荐）
+
+`build.nic_layout: "router"`（默认）会把两块网卡按下面方式使用：
+
+| PVE 网卡 | 设备 | 作用 | config.yml |
+|---|---|---|---|
+| `net0` → `vmbr0` | eth0 | **WAN** | `build.wan_mode` / `wan_ip` / `wan_gateway` / `wan_dns` / `wan6_mode` |
+| `net1` → `vmbr1` | eth1 | **LAN**（br-lan） | `build.lan_ip` / `lan_netmask` / `lan_dhcp_start` / `lan_dhcp_limit` |
+
+生成的 `/etc/config/network` 大致是：
+
+```
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports eth1
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ip6assign '60'
+	list ipaddr 10.10.10.254/24
+
+config interface 'wan'
+	option device eth0
+	option proto static
+	list ipaddr 192.168.60.253/24
+	option gateway 192.168.60.254
+	list dns 192.168.60.254
+	list dns 223.5.5.5
+
+config interface 'wan6'
+	option device eth0
+	option proto dhcpv6
+	...
+```
+
+**地址池必须跟 LAN 网段一致。** `lan_dhcp_start` / `lan_dhcp_limit` 是相对网段
+的主机号：LAN 为 `10.10.10.254/24`、`start=100`、`limit=150` 时，下发给客户端
+的是 `10.10.10.100-249`。OpenWrt 默认 `/etc/config/dhcp` 用的是
+`192.168.1.100-249`，一旦改 LAN 网段而不改它，客户端就会拿到不可达的地址
+（能连上 Wi-Fi/网线但上不了网）。本仓库的 `/etc/config/dhcp` 由 build.sh
+渲染，会自动跟随 LAN 网段。
+
+### 只挂了一块网卡怎么办
+
+`/etc/uci-defaults/99-pve-defaults` 在首次启动时会检查：若 `eth1` 不存在，
+自动把 `eth0` 挪进 `br-lan` 并把 `wan`/`wan6` 置为 `none`，退化成单网卡模式，
+至少还能进 LuCI 改配置 —— 而不是彻底失联。
+
+若本来就打算单网卡（旁路由接上游交换机），直接设：
+
+```yaml
+build:
+  nic_layout: "single"
+```
+
 ## 为什么会出现"SSH 连不上 / Web 打不开"
 
 历史上这个项目产出过几批这样的固件，原因有三个，各自独立：
@@ -10,7 +67,9 @@
 如果你的 PVE 网桥是 `192.168.1.0/24`，固件开机后不在你的网段里——
 SSH 连不上、Web 打不开，看起来就像"服务没启动"，其实服务都在跑。
 
-现在默认 `build.net_mode: "dhcp"`，接上 PVE 网桥就能从上游 DHCP 拿到地址。
+现在接口全部由 `config.yml` 渲染，`nic_layout` 决定哪块网卡是 WAN、哪块是 LAN，
+地址与掩码都以 CIDR 形式生成（`list ipaddr 10.10.10.254/24`）。
+单网卡想走 DHCP 就把 `nic_layout` 设为 `single` 并给 lan 配 `dhcp`。
 
 ### 2. root 无密码时 dropbear 拒绝密码登录
 
@@ -38,18 +97,24 @@ kconfig 会把 luci 和它依赖的 uhttpd 一起丢掉，构建依然"成功"�
    登录后 `ip -4 addr show br-lan` 看拿到的地址。
 2. **DHCP 租约**：在你的上游路由器/DHCP 服务器上找主机名
    `immortalwrt-pve`（可用 `build.hostname` 修改）。
-3. **改回静态**：编辑 `config.yml`：
+3. **改成你的网段**：编辑 `config.yml` 的 `build.*`，例如：
 
    ```yaml
    build:
-     net_mode: "static"
-     lan_ip: "192.168.100.1"
+     nic_layout: "router"
+     wan_mode: "static"
+     wan_ip: "192.168.60.253"
+     wan_netmask: "255.255.255.0"
+     wan_gateway: "192.168.60.254"
+     wan_dns: ["192.168.60.254", "223.5.5.5"]
+     lan_ip: "10.10.10.254"
      lan_netmask: "255.255.255.0"
-     lan_gateway: "192.168.100.1"
-     lan_dns: "223.5.5.5"
+     lan_dhcp_start: "100"
+     lan_dhcp_limit: "150"
    ```
 
-   静态模式下只写非空的 gateway/dns，不会产生 `option gateway ''` 这类脏配置。
+   WAN 的 gateway/dns 只在非空时写入，不会产生 `option gateway ''` 这类脏配置；
+   多个 DNS 会渲染成多条 `list dns`。
 
 ## 验证固件里到底装了什么
 

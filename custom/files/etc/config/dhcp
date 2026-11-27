@@ -1,0 +1,47 @@
+# dhcp — dnsmasq + odhcpd（由 scripts/build.sh 依据 config.yml 渲染）
+#
+# 重点：address pool 的 start/limit 是"相对网段的主机号"，必须与 lan_ip 的
+# 网段一致。OpenWrt 默认 /etc/config/dhcp 用的是 192.168.1.100-249，
+# 一旦 lan_ip 改成别的网段（例如 10.10.10.254/24），下游客户端就会拿到
+# 不可达的 192.168.1.x —— 表现为"能连上但上不了网"。
+# 这里把地址池固定跟随 lan 网段，避免这种错位。
+
+config dnsmasq
+	option domainneeded '1'
+	option boguspriv '1'
+	option filterwin2k '0'
+	option localise_queries '1'
+	option rebind_protection '1'
+	option rebind_localhost '1'
+	option local '/lan/'
+	option domain 'lan'
+	option expandhosts '1'
+	option nonegcache '0'
+	option cachesize '1000'
+	option authoritative '1'
+	option readethers '1'
+	option leasefile '/tmp/dhcp.leases'
+	option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
+	option nonwildcard '1'
+	option localservice '1'
+	option ednspacket_max '1232'
+
+config dhcp 'lan'
+	option interface 'lan'
+	option start '@LAN_DHCP_START@'
+	option limit '@LAN_DHCP_LIMIT@'
+	option leasetime '12h'
+	option dhcpv4 'server'
+	option dhcpv6 'server'
+	option ra 'server'
+	option ra_slaac '1'
+
+config dhcp 'wan'
+	option interface 'wan'
+	option ignore '1'
+
+config odhcpd 'odhcpd'
+	option maindhcp '0'
+	option leasefile '/tmp/hosts/odhcpd'
+	option leasetrigger '/usr/sbin/odhcpd-update'
+	option loglevel '4'

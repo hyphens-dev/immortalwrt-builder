@@ -26,62 +26,114 @@ OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 
 # 渲染 custom/files overlay 里的占位符。
 #
-# 关键点：lan 接口的 proto / 地址不再写死。写死静态 IP 会让固件落在与用户
-# PVE 网桥不同的网段上，表现为"SSH 连不上、Web 打不开"，看起来就像服务没起。
-# 默认 proto=dhcp，接上 PVE 网桥即可从上游拿到地址。
+# 关键点：接口一律不写死。写死一个与用户网桥不同网段的地址，会表现为
+# "SSH 连不上、Web 打不开"，看起来就像服务没启动。
+#
+# 两种网口布局（build.nic_layout）：
+#   router : eth0 -> wan，eth1 -> lan
+#            PVE 里对应 net0=vmbr0(WAN)、net1=vmbr1(LAN)
+#   single : eth0 -> lan（单网卡旁路由，无独立 WAN）
+#
+# 模板占位符必须"整行精确匹配"替换：文件头的说明里也会提到这些占位符，
+# 用子串匹配会把内容插到注释行处（踩过）。
 render_overlay() {
-  local lan_ip="$1" hostname="$2"
-  local net_mode netmask gateway dns proto stanza_file
+  local hostname="$1"
+  local layout root_pw
 
-  net_mode="$(cfg build.net_mode "dhcp")"
-  netmask="$(cfg build.lan_netmask "255.255.255.0")"
-  gateway="$(cfg build.lan_gateway "")"
-  dns="$(cfg build.lan_dns "")"
+  layout="$(cfg build.nic_layout "router")"
 
-  case "${net_mode}" in
-    static) proto="static" ;;
-    dhcp|"") proto="dhcp" ;;
-    *) log_warn "未知 build.net_mode='${net_mode}'，回退为 dhcp"; proto="dhcp" ;;
+  local lan_ip lan_netmask lan_prefix lan_start lan_limit
+  lan_ip="$(cfg build.lan_ip "10.10.10.254")"
+  lan_netmask="$(cfg build.lan_netmask "255.255.255.0")"
+  lan_prefix="$(netmask_to_prefix "${lan_netmask}")"
+  lan_start="$(cfg build.lan_dhcp_start "100")"
+  lan_limit="$(cfg build.lan_dhcp_limit "150")"
+
+  local wan_mode wan_ip wan_netmask wan_prefix wan_gateway wan6
+  wan_mode="$(cfg build.wan_mode "dhcp")"
+  wan_ip="$(cfg build.wan_ip "")"
+  wan_netmask="$(cfg build.wan_netmask "255.255.255.0")"
+  wan_prefix="$(netmask_to_prefix "${wan_netmask}")"
+  wan_gateway="$(cfg build.wan_gateway "")"
+  wan6="$(cfg build.wan6_mode "dhcpv6")"
+
+  # ---------------- LAN：网桥端口 ----------------
+  local lan_ports lan_addrs
+  case "${layout}" in
+    router)
+      lan_ports="$(printf '\tlist ports %s' eth1)"
+      ;;
+    single)
+      # 单网卡：eth0 直接进 br-lan，不存在独立 WAN
+      lan_ports="$(printf '\tlist ports %s' eth0)"
+      wan_mode="none"
+      ;;
+    *)
+      log_warn "未知 build.nic_layout='${layout}'，按 router 处理"
+      lan_ports="$(printf '\tlist ports %s' eth1)"
+      ;;
   esac
 
-  # 生成 lan 段附加选项；dhcp 模式下 ipaddr 等由 netifd 忽略，
-  # 但为空值时不写，避免出现 option gateway '' 这类脏配置。
-  stanza_file="$(mktemp)"
-  {
-    if [[ "${proto}" == "static" ]]; then
-      printf '\toption ipaddr %s\n' "${lan_ip}"
-      printf '\toption netmask %s\n' "${netmask}"
-      [[ -n "${gateway}" ]] && printf '\toption gateway %s\n' "${gateway}"
-      [[ -n "${dns}" ]] && printf '\tlist dns %s\n' "${dns}"
+  # ---------------- LAN：地址 ----------------
+  # 作为主路由时 LAN 必须 static —— 它要给下游设备提供 DHCP。
+  lan_addrs="$(printf '\tlist ipaddr %s/%s' "${lan_ip}" "${lan_prefix}")"
+
+  # ---------------- WAN ----------------
+  local wan_block="" d
+  if [[ "${wan_mode}" != "none" ]]; then
+    wan_block="config interface 'wan'"$'\n'
+    wan_block+="$(printf '\toption device %s' eth0)"$'\n'
+    wan_block+="$(printf '\toption proto %s' "${wan_mode}")"$'\n'
+
+    if [[ "${wan_mode}" == "static" ]]; then
+      if [[ -z "${wan_ip}" ]]; then
+        log_err "build.wan_mode=static 但 build.wan_ip 为空"
+        exit 1
+      fi
+      wan_block+="$(printf '\tlist ipaddr %s/%s' "${wan_ip}" "${wan_prefix}")"$'\n'
+      if [[ -n "${wan_gateway}" ]]; then
+        wan_block+="$(printf '\toption gateway %s' "${wan_gateway}")"$'\n'
+      fi
     fi
-    printf '\toption ip6assign 60\n'
-    printf '\toption delegate 0\n'
-  } > "${stanza_file}"
 
-  # 用 awk 做多行替换（sed 的 s/// 不擅长插入多行）
-  awk -v stanza_file="${stanza_file}" '
-    # 必须整行精确匹配：文件头的说明里也提到过这个占位符，
-    # 用 /@LAN_STANZA@/ 会把 stanza 插到注释行处。
-    $0 == "@LAN_STANZA@" { while ((getline line < stanza_file) > 0) print line; next }
-    { print }
-  ' files/etc/config/network > files/etc/config/network.new
-  mv files/etc/config/network.new files/etc/config/network
-  rm -f "${stanza_file}"
+    # WAN 侧 DNS 可以给多个
+    while IFS= read -r d; do
+      [[ -z "${d}" ]] && continue
+      wan_block+="$(printf '\tlist dns %s' "${d}")"$'\n'
+    done < <(cfg_list build.wan_dns 2>/dev/null || true)
 
-  sed -i "s/@LAN_PROTO@/${proto}/g" files/etc/config/network
-  sed -i "s/@LAN_IP@/${lan_ip}/g" files/etc/config/network
-  sed -i "s/@LAN_NETMASK@/${netmask}/g" files/etc/config/network
+    if [[ "${wan6}" == "dhcpv6" ]]; then
+      wan_block+=$'\n'
+      wan_block+="config interface 'wan6'"$'\n'
+      wan_block+="$(printf '\toption device %s' eth0)"$'\n'
+      wan_block+="$(printf '\toption proto %s' dhcpv6)"$'\n'
+      wan_block+="$(printf '\toption reqaddress %s' try)"$'\n'
+      wan_block+="$(printf '\toption reqprefix %s' auto)"$'\n'
+      wan_block+="$(printf '\toption norelease %s' 1)"$'\n'
+    fi
+  fi
 
-  # hostname
+  substitute_block files/etc/config/network "@LAN_PORTS@" "${lan_ports}"
+  substitute_block files/etc/config/network "@LAN_ADDRS@" "${lan_addrs}"
+  substitute_block files/etc/config/network "@WAN_BLOCK@" "${wan_block}"
+
+  # ---------------- dhcp 地址池 ----------------
+  # 地址池的 start/limit 是相对网段的主机号，必须跟随 lan_ip 的网段，
+  # 否则客户端会拿到不可达的地址（"连上了但上不了网"）。
+  if [[ -f files/etc/config/dhcp ]]; then
+    sed -i "s/@LAN_DHCP_START@/${lan_start}/g" files/etc/config/dhcp
+    sed -i "s/@LAN_DHCP_LIMIT@/${lan_limit}/g" files/etc/config/dhcp
+  fi
+
+  # ---------------- hostname ----------------
   if [[ -f files/etc/config/system ]]; then
     sed -i "s/@HOSTNAME@/${hostname}/g" files/etc/config/system
   fi
 
-  # root 密码：为空则删除该 uci-defaults（此时只能靠 LuCI 或串口设置密码）
-  local root_pw
+  # ---------------- root 密码 ----------------
   root_pw="$(cfg build.root_password "")"
   if [[ -n "${root_pw}" ]]; then
-    sed -i "s/@ROOT_PASSWORD@/${root_pw}/g" files/etc/uci-defaults/99-pve-defaults
+    sed -i "s|@ROOT_PASSWORD@|${root_pw}|g" files/etc/uci-defaults/99-pve-defaults
     log_info "已设置首次启动的 root 密码（请登录后立即 passwd 修改）"
   else
     rm -f files/etc/uci-defaults/99-pve-defaults
@@ -89,7 +141,51 @@ render_overlay() {
     log_warn "此时请通过 LuCI 或 PVE 串口控制台设置密码后再 SSH"
   fi
 
-  log_info "overlay 已渲染: net_mode=${proto}, hostname=${hostname}"
+  log_info "overlay 已渲染: layout=${layout}, wan=${wan_mode}, lan=${lan_ip}/${lan_prefix}"
+}
+
+# 把模板里的"整行"占位符替换成多行内容
+# 用法: substitute_block <文件> <占位符> <内容>
+substitute_block() {
+  local file="$1" placeholder="$2" content="$3"
+  local tmp_content tmp_out
+
+  tmp_content="$(mktemp)"
+  tmp_out="$(mktemp)"
+
+  # 内容为空时保留空文件，即删除该占位符所在行
+  if [[ -n "${content}" ]]; then
+    printf '%s\n' "${content}" > "${tmp_content}"
+  fi
+
+  awk -v want="${placeholder}" -v src="${tmp_content}" '
+    $0 == want { while ((getline line < src) > 0) print line; next }
+    { print }
+  ' "${file}" > "${tmp_out}"
+
+  mv "${tmp_out}" "${file}"
+  rm -f "${tmp_content}"
+}
+
+# "255.255.255.0" -> 24
+netmask_to_prefix() {
+  local mask="$1" prefix=0 octet
+  local IFS=.
+  for octet in ${mask}; do
+    case "${octet}" in
+      255) prefix=$((prefix + 8)) ;;
+      254) prefix=$((prefix + 7)) ;;
+      252) prefix=$((prefix + 6)) ;;
+      248) prefix=$((prefix + 5)) ;;
+      240) prefix=$((prefix + 4)) ;;
+      224) prefix=$((prefix + 3)) ;;
+      192) prefix=$((prefix + 2)) ;;
+      128) prefix=$((prefix + 1)) ;;
+      0) ;;
+      *) log_warn "非标准子网掩码 ${mask}，按 /24 处理"; printf '24'; return 0 ;;
+    esac
+  done
+  printf '%s' "${prefix}"
 }
 
 # 构建前检查可用空间：全量 x86_64 + LuCI 构建需要约 12-18GB，
@@ -168,7 +264,7 @@ main() {
   rm -rf files
   cp -r "${REPO_ROOT}/custom/files" files
 
-  render_overlay "${lan_ip}" "${hostname}"
+  render_overlay "${hostname}"
 
   # --------------------------------------------------------- 4. dotconfig
   log_info "生成 .config ..."
@@ -297,10 +393,16 @@ verify_critical_packages() {
   if cfg_bool features.luci.statistics; then
     required+=(luci-app-statistics)
   fi
+  # LAN 侧要给下游设备发地址，dnsmasq（或 dnsmasq-full）必须在
+  if [[ "$(cfg build.nic_layout router)" != "single" ]]; then
+    required+=(dnsmasq)
+  fi
 
   for p in "${required[@]}"; do
-    # 允许 =y 或 =m
-    grep -qE "^CONFIG_PACKAGE_${p}=(y|m)$" .config || missing+=("${p}")
+    # 允许 =y 或 =m；dnsmasq 可能由 dnsmasq-full 提供（虚拟包）
+    if ! grep -qE "^CONFIG_PACKAGE_${p}(-full)?=(y|m)$" .config; then
+      missing+=("${p}")
+    fi
   done
 
   if (( ${#missing[@]} > 0 )); then
