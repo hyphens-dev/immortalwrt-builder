@@ -1,0 +1,24 @@
+#!/bin/sh
+# uci-defaults — 首次启动时执行一次（成功退出后会被自动删除）
+# @ROOT_PASSWORD@ 由 scripts/build.sh 依据 config.yml 的 build.root_password 渲染。
+#
+# 注意：OpenWrt 默认 root 无密码，而 dropbear 在 root 无密码时会拒绝密码登录，
+# 表现就是"SSH 连不上/服务像是没起"。这里在首次启动时把密码设上，
+# 保证开箱即可 SSH（请登录后立刻 passwd 修改）。
+
+# build.root_password 为空时 scripts/build.sh 会删除本文件，因此这里直接设置
+printf 'root:%s\n' '@ROOT_PASSWORD@' | chpasswd
+
+# dropbear 允许密码认证（默认就是 on，这里显式确保）
+uci -q get dropbear.@dropbear[0] >/dev/null 2>&1 || uci -q add dropbear dropbear
+uci -q set dropbear.@dropbear[0].PasswordAuth='on'
+uci -q set dropbear.@dropbear[0].RootPasswordAuth='on'
+uci -q set dropbear.@dropbear[0].Port='22'
+uci -q commit dropbear
+
+# LuCI/uhttpd 若存在则确保开机自启
+for svc in uhttpd dropbear firewall; do
+	[ -x "/etc/init.d/${svc}" ] && /etc/init.d/${svc} enable >/dev/null 2>&1
+done
+
+exit 0

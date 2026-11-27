@@ -24,6 +24,74 @@ source "${SCRIPT_DIR}/utils.sh"
 SRC_DIR="${SRC_DIR:-${REPO_ROOT}/openwrt}"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 
+# 渲染 custom/files overlay 里的占位符。
+#
+# 关键点：lan 接口的 proto / 地址不再写死。写死静态 IP 会让固件落在与用户
+# PVE 网桥不同的网段上，表现为"SSH 连不上、Web 打不开"，看起来就像服务没起。
+# 默认 proto=dhcp，接上 PVE 网桥即可从上游拿到地址。
+render_overlay() {
+  local lan_ip="$1" hostname="$2"
+  local net_mode netmask gateway dns proto stanza_file
+
+  net_mode="$(cfg build.net_mode "dhcp")"
+  netmask="$(cfg build.lan_netmask "255.255.255.0")"
+  gateway="$(cfg build.lan_gateway "")"
+  dns="$(cfg build.lan_dns "")"
+
+  case "${net_mode}" in
+    static) proto="static" ;;
+    dhcp|"") proto="dhcp" ;;
+    *) log_warn "未知 build.net_mode='${net_mode}'，回退为 dhcp"; proto="dhcp" ;;
+  esac
+
+  # 生成 lan 段附加选项；dhcp 模式下 ipaddr 等由 netifd 忽略，
+  # 但为空值时不写，避免出现 option gateway '' 这类脏配置。
+  stanza_file="$(mktemp)"
+  {
+    if [[ "${proto}" == "static" ]]; then
+      printf '\toption ipaddr %s\n' "${lan_ip}"
+      printf '\toption netmask %s\n' "${netmask}"
+      [[ -n "${gateway}" ]] && printf '\toption gateway %s\n' "${gateway}"
+      [[ -n "${dns}" ]] && printf '\tlist dns %s\n' "${dns}"
+    fi
+    printf '\toption ip6assign 60\n'
+    printf '\toption delegate 0\n'
+  } > "${stanza_file}"
+
+  # 用 awk 做多行替换（sed 的 s/// 不擅长插入多行）
+  awk -v stanza_file="${stanza_file}" '
+    # 必须整行精确匹配：文件头的说明里也提到过这个占位符，
+    # 用 /@LAN_STANZA@/ 会把 stanza 插到注释行处。
+    $0 == "@LAN_STANZA@" { while ((getline line < stanza_file) > 0) print line; next }
+    { print }
+  ' files/etc/config/network > files/etc/config/network.new
+  mv files/etc/config/network.new files/etc/config/network
+  rm -f "${stanza_file}"
+
+  sed -i "s/@LAN_PROTO@/${proto}/g" files/etc/config/network
+  sed -i "s/@LAN_IP@/${lan_ip}/g" files/etc/config/network
+  sed -i "s/@LAN_NETMASK@/${netmask}/g" files/etc/config/network
+
+  # hostname
+  if [[ -f files/etc/config/system ]]; then
+    sed -i "s/@HOSTNAME@/${hostname}/g" files/etc/config/system
+  fi
+
+  # root 密码：为空则删除该 uci-defaults（此时只能靠 LuCI 或串口设置密码）
+  local root_pw
+  root_pw="$(cfg build.root_password "")"
+  if [[ -n "${root_pw}" ]]; then
+    sed -i "s/@ROOT_PASSWORD@/${root_pw}/g" files/etc/uci-defaults/99-pve-defaults
+    log_info "已设置首次启动的 root 密码（请登录后立即 passwd 修改）"
+  else
+    rm -f files/etc/uci-defaults/99-pve-defaults
+    log_warn "build.root_password 为空：root 将无密码，dropbear 会拒绝密码登录"
+    log_warn "此时请通过 LuCI 或 PVE 串口控制台设置密码后再 SSH"
+  fi
+
+  log_info "overlay 已渲染: net_mode=${proto}, hostname=${hostname}"
+}
+
 # 构建前检查可用空间：全量 x86_64 + LuCI 构建需要约 12-18GB，
 # 空间不足时应在 30 秒内明确失败，而不是编译两小时后
 # 在 make install/image 阶段报 "No space left on device"。
@@ -100,9 +168,7 @@ main() {
   rm -rf files
   cp -r "${REPO_ROOT}/custom/files" files
 
-  # 用 config 中的 LAN IP / hostname 渲染 overlay（sed 就地替换占位符）
-  sed -i "s/@LAN_IP@/${lan_ip}/g; s/@HOSTNAME@/${hostname}/g" \
-    files/etc/config/network
+  render_overlay "${lan_ip}" "${hostname}"
 
   # --------------------------------------------------------- 4. dotconfig
   log_info "生成 .config ..."
@@ -183,9 +249,68 @@ main() {
   fi
   log_info "已收集 ${copied} 个产物文件"
 
+  # 打印最终的包清单。镜像目录里的 *.manifest 由 OpenWrt 在打包时生成，
+  # 逐行列出实际装进 rootfs 的每个包，是判断"固件里到底有没有 dropbear /
+  # luci / uhttpd"的唯一权威依据（比看 .config 可靠）。
+  local pkg_manifest
+  pkg_manifest="$(find "${tdir}" -maxdepth 1 -type f -name '*.manifest' -print -quit 2>/dev/null)"
+  if [[ -n "${pkg_manifest}" ]]; then
+    cp -f "${pkg_manifest}" "${OUT_DIR}/package-manifest.txt"
+    local n_pkg
+    n_pkg="$(wc -l < "${pkg_manifest}")"
+    log_info "rootfs 内实际安装包数量: ${n_pkg}"
+    local need
+    for need in dropbear uhttpd luci-base; do
+      if grep -qE "^-? *${need}( |$)" "${pkg_manifest}"; then
+        log_info "  [有] ${need}"
+      else
+        log_warn "  [缺] ${need} —— 该固件可能无法 SSH / 打开 Web 界面"
+      fi
+    done
+  else
+    log_warn "未找到 *.manifest，无法核对 rootfs 内实际安装的包"
+  fi
+
   write_manifest "${OUT_DIR}/manifest.json" "${board}" "${subtarget}" "${profile}"
   log_info "完成！产物位于 ${OUT_DIR}/"
   find "${OUT_DIR}" -maxdepth 1 -type f -printf '  %f %s bytes\n'
+}
+
+# defconfig 会静默丢弃"包不存在"的 CONFIG_PACKAGE_*_y（例如 luci feed 没装
+# 成功时的 luci / uhttpd）。不校验的话构建依然"成功"，但产出的固件没有 Web、
+# 没有 SSH，只能返工重烧。这里把关键包列成清单做硬断言。
+verify_critical_packages() {
+  local missing=() p
+  local required=()
+
+  # 基础系统与管理通道
+  required+=(base-files busybox dropbear)
+  if cfg_bool features.luci.enabled; then
+    required+=(luci uhttpd uhttpd-mod-ubus firewall4)
+  fi
+  if cfg_bool features.network.wireguard; then
+    required+=(kmod-wireguard)
+  fi
+  if cfg_bool features.virtiofs.enabled; then
+    required+=(kmod-fs-virtiofs kmod-fuse)
+  fi
+  if cfg_bool features.luci.statistics; then
+    required+=(luci-app-statistics)
+  fi
+
+  for p in "${required[@]}"; do
+    # 允许 =y 或 =m
+    grep -qE "^CONFIG_PACKAGE_${p}=(y|m)$" .config || missing+=("${p}")
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    log_err "以下关键包未被选中（defconfig 已经把对应 CONFIG_PACKAGE_* 丢弃）："
+    for p in "${missing[@]}"; do log_err "  - ${p}"; done
+    log_err "最常见原因：feeds 未安装完整（luci feed），或包名/版本不匹配。"
+    log_err "请检查上面的 feeds 步骤输出，以及 ./scripts/feeds list 的结果。"
+    exit 1
+  fi
+  log_info "关键包校验通过: ${required[*]}"
 }
 
 # 并行 make 失败后，OpenWrt 只会打印一句
@@ -373,10 +498,25 @@ CONFIG_PACKAGE_sqm-scripts=y
 CONFIG_PACKAGE_luci-app-sqm=y
 EOF
 
+  # ------------------------------------------------- ssh（dropbear）
+  # dropbear 属于 include/target.mk 的 DEFAULT_PACKAGES，但那是"默认值"，
+  # 一旦 profile 展开或 feed 时序出问题就会被 defconfig 静默丢掉，
+  # 结果固件能开机却无法 SSH 登录。这里显式选中，保证一定进镜像。
+  cfg_bool features.ssh.enabled && cat >> .config <<'EOF'
+CONFIG_PACKAGE_dropbear=y
+CONFIG_PACKAGE_dropbearconvert=y
+EOF
+
   # --------------------------------------------------------------- luci
   if cfg_bool features.luci.enabled; then
+    # uhttpd 必须显式选中：luci 本身只是前端，Web 服务由 uhttpd 提供。
+    # 只写 CONFIG_PACKAGE_luci=y 时，如果 luci feed 没装好，kconfig 会把
+    # luci 和 uhttpd 一起丢掉，产出"没有 Web 界面"的固件。
     cat >> .config <<'EOF'
 CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_uhttpd=y
+CONFIG_PACKAGE_uhttpd-mod-ubus=y
 EOF
     case "$(cfg features.luci.theme bootstrap)" in
       material) echo 'CONFIG_PACKAGE_luci-theme-material=y' ;;
@@ -415,6 +555,8 @@ EOF
     make defconfig V=s
   fi
   log_info ".config 生成完毕（$(grep -c '^CONFIG_' .config) 个符号）"
+
+  verify_critical_packages
 }
 
 write_manifest() {

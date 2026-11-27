@@ -1,6 +1,10 @@
 # network — ImmortalWrt PVE Builder rootfs overlay
-# @LAN_IP@ / @HOSTNAME@ 由 scripts/build.sh 依据 config.yml 渲染。
-# eth0 = PVE virtio-net 网卡，默认静态 LAN；如需 DHCP 把 proto 改为 dhcp。
+# proto/地址等占位符由 scripts/build.sh 依据 config.yml 渲染。
+# eth0 = PVE virtio-net 网卡。
+#
+# 默认 proto=dhcp：接上 PVE 网桥后由上游 DHCP 分配地址，开机即可 SSH/Web。
+# 想当旁路由固定 IP，把 config.yml 的 build.net_mode 改为 static 并设置
+# build.lan_ip / build.lan_gateway。
 
 config device
 	option name 'br-lan'
@@ -19,8 +23,5 @@ config globals 'globals'
 
 config interface 'lan'
 	option device 'br-lan'
-	option proto 'static'
-	option ipaddr '@LAN_IP@'
-	option netmask '255.255.255.0'
-	option ip6assign '60'
-	option delegate '0'
+	option proto '@LAN_PROTO@'
+@LAN_STANZA@

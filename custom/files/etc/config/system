@@ -1,0 +1,11 @@
+# system — hostname 由 scripts/build.sh 依据 config.yml 的 build.hostname 渲染
+config system
+	option hostname '@HOSTNAME@'
+	option timezone 'CST-8'
+	option zonename 'Asia/Shanghai'
+
+config timeserver 'ntp'
+	list server 'ntp.aliyun.com'
+	list server 'time1.cloud.tencent.com'
+	list enabled '1'
+	option enable_server '0'

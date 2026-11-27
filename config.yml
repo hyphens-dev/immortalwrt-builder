@@ -104,6 +104,10 @@ features:
     tunning: true          # 900-pve-tuning.conf sysctl（BBR 默认拥塞控制等）
 
   # LuCI 界面
+  # SSH 管理通道（dropbear）。关闭后只能靠串口/控制台，默认必须开启。
+  ssh:
+    enabled: true
+
   luci:
     enabled: true
     theme: "bootstrap"     # 浅色主题：luci-theme-bootstrap（内置浅色）
@@ -119,9 +123,23 @@ features:
 build:
   # 固件版本前缀，影响镜像文件名与 /etc/openwrt_release
   version_prefix: "PVE"
-  # 默认管理 IP（写入 custom/files/etc/config/network 的 lan 段）
+  # lan 地址获取方式：dhcp（默认）| static
+  # dhcp 最不容易把人挡在门外：接上 PVE 网桥就能拿到上游分配的地址。
+  # 当旁路由需要固定 IP 时改成 static，并设置下面的 lan_ip/gateway。
+  # 注意：写死一个与你的网桥不同网段的静态 IP，会表现为
+  # "SSH 连不上 / Web 打不开"，看起来像服务没启动。
+  net_mode: "dhcp"
+  # static 模式下生效
   lan_ip: "192.168.100.1"
   lan_netmask: "255.255.255.0"
+  lan_gateway: ""          # 留空则不写 gateway（dhcp 模式下忽略）
+  lan_dns: ""              # 留空则不写 dns（dhcp 模式下忽略）
+
+  # 首次启动时设置的 root 密码；留空则不设置。
+  # OpenWrt 默认 root 无密码，dropbear 会拒绝密码登录 —— 这就是"SSH 连不上"
+  # 的常见原因。设置后开箱即可 SSH，请登录后立即 passwd 修改。
+  # 使用特殊字符时注意 YAML 引号。
+  root_password: "root"
   # 主机名
   hostname: "immortalwrt-pve"
   # 压缩格式
